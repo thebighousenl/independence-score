@@ -133,6 +133,26 @@
   company: Google
   bucket: company
   category: blogging
+- domain: google.de
+  company: Google
+  bucket: company
+  category: search
+- domain: google.co.uk
+  company: Google
+  bucket: company
+  category: search
+- domain: google.fr
+  company: Google
+  bucket: company
+  category: search
+- domain: google.ca
+  company: Google
+  bucket: company
+  category: search
+- domain: nest.com
+  company: Google
+  bucket: company
+  category: smart-home
 
 # --- Meta ---
 - domain: facebook.com
@@ -653,3 +673,553 @@
   company: Bitwarden
   bucket: self-hosted
   category: password-manager
+
+# --- Netflix ---
+- domain: netflix.com
+  company: Netflix
+  bucket: company
+  category: video
+- domain: nflxvideo.net
+  company: Netflix
+  bucket: company
+  category: video
+- domain: nflximg.net
+  company: Netflix
+  bucket: company
+  category: video
+- domain: nflxso.net
+  company: Netflix
+  bucket: company
+  category: video
+
+# --- Spotify ---
+- domain: spotify.com
+  company: Spotify
+  bucket: company
+  category: music
+- domain: spotifycdn.com
+  company: Spotify
+  bucket: company
+  category: music
+- domain: scdn.co
+  company: Spotify
+  bucket: company
+  category: music
+- domain: spoti.fi
+  company: Spotify
+  bucket: company
+  category: music
+
+# --- Cloudflare ---
+- domain: cloudflare.com
+  company: Cloudflare
+  bucket: company
+  category: cloud-infra
+- domain: cloudflareinsights.com
+  company: Cloudflare
+  bucket: company
+  category: cloud-infra
+- domain: workers.dev
+  company: Cloudflare
+  bucket: company
+  category: cloud-infra
+
+# --- Dropbox ---
+- domain: dropbox.com
+  company: Dropbox
+  bucket: company
+  category: file-sync
+- domain: dropboxusercontent.com
+  company: Dropbox
+  bucket: company
+  category: file-sync
+
+# --- Zoom ---
+- domain: zoom.us
+  company: Zoom
+  bucket: company
+  category: video-conferencing
+- domain: zoomgov.com
+  company: Zoom
+  bucket: company
+  category: video-conferencing
+
+# --- Discord ---
+- domain: discord.com
+  company: Discord
+  bucket: company
+  category: chat
+- domain: discordapp.com
+  company: Discord
+  bucket: company
+  category: chat
+- domain: discord.gg
+  company: Discord
+  bucket: company
+  category: chat
+- domain: discordapp.net
+  company: Discord
+  bucket: company
+  category: chat
+
+# --- Slack ---
+- domain: slack.com
+  company: Salesforce
+  bucket: company
+  category: productivity
+- domain: slack-edge.com
+  company: Salesforce
+  bucket: company
+  category: productivity
+
+# --- Valve ---
+- domain: steampowered.com
+  company: Valve
+  bucket: company
+  category: gaming
+- domain: steamcontent.com
+  company: Valve
+  bucket: company
+  category: gaming
+- domain: steamstatic.com
+  company: Valve
+  bucket: company
+  category: gaming
+- domain: valvesoftware.com
+  company: Valve
+  bucket: company
+  category: gaming
+
+# --- Reddit ---
+- domain: reddit.com
+  company: Reddit
+  bucket: company
+  category: social
+- domain: redditstatic.com
+  company: Reddit
+  bucket: company
+  category: social
+- domain: redd.it
+  company: Reddit
+  bucket: company
+  category: social
+
+# --- X (Twitter) ---
+- domain: twitter.com
+  company: X Corp
+  bucket: company
+  category: social
+- domain: x.com
+  company: X Corp
+  bucket: company
+  category: social
+- domain: twimg.com
+  company: X Corp
+  bucket: company
+  category: social
+
+# --- TikTok / ByteDance ---
+- domain: tiktok.com
+  company: ByteDance
+  bucket: company
+  category: social
+- domain: tiktokcdn.com
+  company: ByteDance
+  bucket: company
+  category: social
+- domain: musical.ly
+  company: ByteDance
+  bucket: company
+  category: social
+
+# --- Snap ---
+- domain: snapchat.com
+  company: Snap Inc
+  bucket: company
+  category: social
+
+# --- Pinterest ---
+- domain: pinterest.com
+  company: Pinterest
+  bucket: company
+  category: social
+- domain: pinimg.com
+  company: Pinterest
+  bucket: company
+  category: social
+
+# --- Yahoo ---
+- domain: yahoo.com
+  company: Yahoo
+  bucket: company
+  category: media
+- domain: yimg.com
+  company: Yahoo
+  bucket: company
+  category: media
+
+# --- Samsung ---
+- domain: samsung.com
+  company: Samsung
+  bucket: company
+  category: electronics
+- domain: smartthings.com
+  company: Samsung
+  bucket: company
+  category: smart-home
+
+# --- Other smart-home / IoT hardware vendors ---
+- domain: sonos.com
+  company: Sonos
+  bucket: company
+  category: smart-home
+- domain: roku.com
+  company: Roku
+  bucket: company
+  category: media
+- domain: eero.com
+  company: Amazon
+  bucket: company
+  category: networking
+- domain: irobot.com
+  company: iRobot
+  bucket: company
+  category: smart-home
+- domain: meethue.com
+  company: Signify
+  bucket: company
+  category: smart-home
+- domain: ecobee.com
+  company: ecobee
+  bucket: company
+  category: smart-home
+- domain: wyze.com
+  company: Wyze Labs
+  bucket: company
+  category: security-camera
+- domain: arlo.com
+  company: Arlo Technologies
+  bucket: company
+  category: security-camera
+
+# --- Networking hardware vendors ---
+- domain: ui.com
+  company: Ubiquiti
+  bucket: company
+  category: networking
+- domain: ubnt.com
+  company: Ubiquiti
+  bucket: company
+  category: networking
+- domain: tp-link.com
+  company: TP-Link
+  bucket: company
+  category: networking
+- domain: netgear.com
+  company: NETGEAR
+  bucket: company
+  category: networking
+- domain: asus.com
+  company: ASUSTeK
+  bucket: company
+  category: electronics
+
+# --- Productivity / collaboration SaaS ---
+- domain: adobe.com
+  company: Adobe
+  bucket: company
+  category: productivity
+- domain: adobe.io
+  company: Adobe
+  bucket: company
+  category: productivity
+- domain: typekit.net
+  company: Adobe
+  bucket: company
+  category: productivity
+- domain: salesforce.com
+  company: Salesforce
+  bucket: company
+  category: productivity
+- domain: force.com
+  company: Salesforce
+  bucket: company
+  category: productivity
+- domain: box.com
+  company: Box
+  bucket: company
+  category: file-sync
+- domain: evernote.com
+  company: Evernote
+  bucket: company
+  category: productivity
+- domain: notion.so
+  company: Notion
+  bucket: company
+  category: productivity
+- domain: atlassian.com
+  company: Atlassian
+  bucket: company
+  category: devops
+- domain: atlassian.net
+  company: Atlassian
+  bucket: company
+  category: devops
+- domain: gitlab.com
+  company: GitLab
+  bucket: company
+  category: devops
+- domain: docker.com
+  company: Docker
+  bucket: company
+  category: devops
+- domain: docker.io
+  company: Docker
+  bucket: company
+  category: devops
+- domain: npmjs.com
+  company: Microsoft
+  bucket: company
+  category: devops
+
+# --- CDN / cloud infrastructure providers ---
+- domain: akamaiedge.net
+  company: Akamai
+  bucket: company
+  category: cdn
+- domain: akamaitechnologies.com
+  company: Akamai
+  bucket: company
+  category: cdn
+- domain: akadns.net
+  company: Akamai
+  bucket: company
+  category: cdn
+- domain: fastly.net
+  company: Fastly
+  bucket: company
+  category: cdn
+- domain: fastlylb.net
+  company: Fastly
+  bucket: company
+  category: cdn
+- domain: digitalocean.com
+  company: DigitalOcean
+  bucket: company
+  category: cloud-infra
+- domain: digitaloceanspaces.com
+  company: DigitalOcean
+  bucket: company
+  category: cloud-infra
+- domain: linode.com
+  company: Akamai
+  bucket: company
+  category: cloud-infra
+- domain: hetzner.com
+  company: Hetzner
+  bucket: company
+  category: cloud-infra
+- domain: hetzner.de
+  company: Hetzner
+  bucket: company
+  category: cloud-infra
+- domain: ovh.com
+  company: OVHcloud
+  bucket: company
+  category: cloud-infra
+- domain: ovh.net
+  company: OVHcloud
+  bucket: company
+  category: cloud-infra
+- domain: vultr.com
+  company: Vultr
+  bucket: company
+  category: cloud-infra
+
+# --- Domains / certificates ---
+- domain: godaddy.com
+  company: GoDaddy
+  bucket: company
+  category: domains
+- domain: namecheap.com
+  company: Namecheap
+  bucket: company
+  category: domains
+- domain: letsencrypt.org
+  company: Let's Encrypt
+  bucket: company
+  category: certificates
+
+# --- Browsers / privacy-focused messaging ---
+- domain: mozilla.org
+  company: Mozilla
+  bucket: company
+  category: browser
+- domain: mozilla.com
+  company: Mozilla
+  bucket: company
+  category: browser
+- domain: firefox.com
+  company: Mozilla
+  bucket: company
+  category: browser
+- domain: signal.org
+  company: Signal
+  bucket: company
+  category: messaging
+- domain: telegram.org
+  company: Telegram
+  bucket: company
+  category: messaging
+- domain: proton.me
+  company: Proton AG
+  bucket: company
+  category: email
+- domain: protonmail.com
+  company: Proton AG
+  bucket: company
+  category: email
+- domain: tailscale.com
+  company: Tailscale
+  bucket: company
+  category: vpn
+
+# --- Gaming publishers ---
+- domain: epicgames.com
+  company: Epic Games
+  bucket: company
+  category: gaming
+- domain: unrealengine.com
+  company: Epic Games
+  bucket: company
+  category: gaming
+- domain: fortnite.com
+  company: Epic Games
+  bucket: company
+  category: gaming
+- domain: nintendo.com
+  company: Nintendo
+  bucket: company
+  category: gaming
+- domain: nintendo.net
+  company: Nintendo
+  bucket: company
+  category: gaming
+- domain: playstation.com
+  company: Sony Interactive Entertainment
+  bucket: company
+  category: gaming
+- domain: playstation.net
+  company: Sony Interactive Entertainment
+  bucket: company
+  category: gaming
+- domain: sonyentertainmentnetwork.com
+  company: Sony Interactive Entertainment
+  bucket: company
+  category: gaming
+- domain: ubisoft.com
+  company: Ubisoft
+  bucket: company
+  category: gaming
+- domain: ubi.com
+  company: Ubisoft
+  bucket: company
+  category: gaming
+- domain: ea.com
+  company: Electronic Arts
+  bucket: company
+  category: gaming
+- domain: origin.com
+  company: Electronic Arts
+  bucket: company
+  category: gaming
+- domain: battle.net
+  company: Microsoft
+  bucket: company
+  category: gaming
+- domain: blizzard.com
+  company: Microsoft
+  bucket: company
+  category: gaming
+- domain: activision.com
+  company: Microsoft
+  bucket: company
+  category: gaming
+- domain: minecraft.net
+  company: Microsoft
+  bucket: company
+  category: gaming
+
+# --- More self-hosted software ---
+- domain: wireguard.com
+  company: WireGuard
+  bucket: self-hosted
+  category: vpn
+- domain: netbird.io
+  company: Netbird
+  bucket: self-hosted
+  category: vpn
+- domain: calibre-ebook.com
+  company: Calibre
+  bucket: self-hosted
+  category: ebooks
+- domain: wallabag.org
+  company: Wallabag
+  bucket: self-hosted
+  category: read-later
+- domain: forgejo.org
+  company: Forgejo
+  bucket: self-hosted
+  category: devops
+- domain: authelia.com
+  company: Authelia
+  bucket: self-hosted
+  category: auth
+- domain: keycloak.org
+  company: Keycloak
+  bucket: self-hosted
+  category: auth
+- domain: nginx.org
+  company: NGINX
+  bucket: self-hosted
+  category: infra
+- domain: caddyserver.com
+  company: Caddy
+  bucket: self-hosted
+  category: infra
+- domain: traefik.io
+  company: Traefik Labs
+  bucket: self-hosted
+  category: infra
+- domain: homebridge.io
+  company: Homebridge
+  bucket: self-hosted
+  category: smart-home
+- domain: zigbee2mqtt.io
+  company: Zigbee2MQTT
+  bucket: self-hosted
+  category: smart-home
+- domain: mosquitto.org
+  company: Eclipse Mosquitto
+  bucket: self-hosted
+  category: messaging-protocol
+- domain: frigate.video
+  company: Frigate
+  bucket: self-hosted
+  category: security-camera
+- domain: shinobi.video
+  company: Shinobi
+  bucket: self-hosted
+  category: security-camera
+- domain: wger.de
+  company: wger
+  bucket: self-hosted
+  category: fitness
+- domain: firefly-iii.org
+  company: Firefly III
+  bucket: self-hosted
+  category: finance
+- domain: actualbudget.org
+  company: Actual Budget
+  bucket: self-hosted
+  category: finance
