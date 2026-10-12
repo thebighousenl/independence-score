@@ -43,12 +43,23 @@ type Server struct {
 	Logger Logger
 	// Timeout bounds each upstream round trip. Defaults to 5s if zero.
 	Timeout time.Duration
+	// MaxConcurrentUDP bounds how many UDP queries are in flight to the
+	// upstream at once, and therefore how many goroutines and upstream
+	// sockets the forwarder can ever hold open. Defaults to 256 if zero.
+	// A query received beyond the cap is never dropped or answered
+	// locally - the accept loop blocks acquiring a slot, so excess
+	// datagrams simply queue in the kernel's UDP receive buffer, the same
+	// backpressure any UDP server exhibits under load.
+	MaxConcurrentUDP int
 
 	udpConn net.PacketConn
 	tcpLn   net.Listener
+	udpSem  chan struct{}
+	udpPool chan net.Conn
 }
 
 const maxUDPSize = 65535
+const defaultMaxConcurrentUDP = 256
 
 // ListenAndServe starts the UDP and TCP listeners and blocks, forwarding
 // queries until one of the listeners fails. It closes both listeners
@@ -60,6 +71,11 @@ func (s *Server) ListenAndServe() error {
 	if s.Logger == nil {
 		s.Logger = NoopLogger{}
 	}
+	if s.MaxConcurrentUDP <= 0 {
+		s.MaxConcurrentUDP = defaultMaxConcurrentUDP
+	}
+	s.udpSem = make(chan struct{}, s.MaxConcurrentUDP)
+	s.udpPool = make(chan net.Conn, s.MaxConcurrentUDP)
 
 	udpConn, err := net.ListenPacket("udp", s.Addr)
 	if err != nil {
@@ -83,14 +99,22 @@ func (s *Server) ListenAndServe() error {
 	return err
 }
 
-// Close stops both listeners. ListenAndServe returns once both loops have
-// unwound.
+// Close stops both listeners and releases any pooled upstream sockets.
+// ListenAndServe returns once both loops have unwound.
 func (s *Server) Close() {
 	if s.udpConn != nil {
 		s.udpConn.Close()
 	}
 	if s.tcpLn != nil {
 		s.tcpLn.Close()
+	}
+	for {
+		select {
+		case c := <-s.udpPool:
+			c.Close()
+		default:
+			return
+		}
 	}
 }
 
@@ -103,7 +127,17 @@ func (s *Server) serveUDP(conn net.PacketConn) error {
 		}
 		query := make([]byte, n)
 		copy(query, buf[:n])
-		go s.handleUDP(conn, addr, query)
+
+		// Blocks if MaxConcurrentUDP queries are already in flight,
+		// rather than spawning an unbounded goroutine per query. The
+		// datagram has already been read off the client socket, so
+		// this never drops or rewrites it - it only delays picking up
+		// the *next* datagram until a slot frees up.
+		s.udpSem <- struct{}{}
+		go func() {
+			defer func() { <-s.udpSem }()
+			s.handleUDP(conn, addr, query)
+		}()
 	}
 }
 
@@ -120,24 +154,71 @@ func (s *Server) handleUDP(conn net.PacketConn, addr net.Addr, query []byte) {
 	s.logQuery(query)
 }
 
+// forwardUDP borrows a connected upstream socket from the pool (dialing a
+// new one only when the pool is empty), uses it for exactly one
+// query/response round trip, and returns it to the pool for reuse. The
+// pool never holds more than MaxConcurrentUDP connections because at most
+// that many goroutines ever call this concurrently, so the forwarder's
+// total open upstream sockets are bounded the same way its goroutines are.
 func (s *Server) forwardUDP(query []byte) ([]byte, error) {
-	conn, err := net.DialTimeout("udp", s.Upstream, s.Timeout)
+	conn, err := s.borrowUpstreamUDP()
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
 
 	conn.SetDeadline(time.Now().Add(s.Timeout))
 	if _, err := conn.Write(query); err != nil {
+		conn.Close()
 		return nil, err
 	}
 
-	buf := make([]byte, maxUDPSize)
-	n, err := conn.Read(buf)
-	if err != nil {
-		return nil, err
+	// A reused socket can still have a stale or duplicate response to a
+	// *previous* query sitting in its receive buffer (e.g. a slow
+	// upstream answering just after a prior round trip already timed
+	// out and the goroutine moved on). The DNS header's 2-byte
+	// transaction ID is the only way to tell that response apart from
+	// the one this call is actually waiting for, so every read is
+	// checked against the query's own ID and anything else is
+	// discarded without being relayed - never to the wrong client,
+	// and bounded by the same deadline as the rest of the round trip.
+	hasID := len(query) >= 2
+	var wantID uint16
+	if hasID {
+		wantID = binary.BigEndian.Uint16(query[:2])
 	}
-	return buf[:n], nil
+
+	buf := make([]byte, maxUDPSize)
+	for {
+		n, err := conn.Read(buf)
+		if err != nil {
+			conn.Close()
+			return nil, err
+		}
+		if hasID && (n < 2 || binary.BigEndian.Uint16(buf[:2]) != wantID) {
+			continue
+		}
+		s.returnUpstreamUDP(conn)
+		return buf[:n], nil
+	}
+}
+
+func (s *Server) borrowUpstreamUDP() (net.Conn, error) {
+	select {
+	case conn := <-s.udpPool:
+		return conn, nil
+	default:
+		return net.DialTimeout("udp", s.Upstream, s.Timeout)
+	}
+}
+
+func (s *Server) returnUpstreamUDP(conn net.Conn) {
+	select {
+	case s.udpPool <- conn:
+	default:
+		// Pool is unexpectedly full (shouldn't happen given it is
+		// sized to MaxConcurrentUDP); don't leak the socket.
+		conn.Close()
+	}
 }
 
 func (s *Server) serveTCP(ln net.Listener) error {
