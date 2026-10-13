@@ -67,9 +67,21 @@ type trendDay struct {
 // number of days that actually have aggregate data - never padded out to
 // RequestedWindowDays - so a short history renders honestly as a short
 // table instead of a chart implying a trend that is not there yet.
+//
+// A missing day inside the window is one of two different facts, and the
+// page must not conflate them:
+//
+//   - ShortHistoryDays counts missing days before the first day that has
+//     data - the instance simply has not been running long enough yet.
+//   - GapDays names missing days after that first day of data - a hole in
+//     an otherwise-populated window (container down, or genuinely no
+//     traffic; the aggregate alone cannot tell which, so this does not
+//     guess).
 type trendViewData struct {
 	RequestedWindowDays int
 	Days                []trendDay
+	ShortHistoryDays    int
+	GapDays             []string
 }
 
 func (h *Handler) now() time.Time {
@@ -112,7 +124,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := buildView(day, shares)
-	data.Trend = buildTrendView(windowDays, trendRows)
+	data.Trend = buildTrendView(windowDays, startDay, endDay, trendRows)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := pageTemplate.Execute(w, data); err != nil {
@@ -156,7 +168,13 @@ func buildView(day string, shares []store.DayShare) viewData {
 // its aggregate was never written renders as an absent row, not a zero
 // one, so a short history looks like a short table rather than a flat
 // line claiming more history than the store actually has.
-func buildTrendView(requestedWindowDays int, rows []store.TrendRow) trendViewData {
+//
+// windowStart and windowEnd are walked day by day to classify every
+// missing day as either short history (before the first day with data) or
+// a gap (after it) - see trendViewData's doc comment. Nothing is padded
+// into Days itself; ShortHistoryDays and GapDays are reported separately
+// so the template can say exactly which fact is true.
+func buildTrendView(requestedWindowDays int, windowStart, windowEnd time.Time, rows []store.TrendRow) trendViewData {
 	order := make([]string, 0)
 	byDay := make(map[string][]store.DayShare)
 	for _, r := range rows {
@@ -182,6 +200,25 @@ func buildTrendView(requestedWindowDays int, rows []store.TrendRow) trendViewDat
 			UnclassifiedPct:   v.UnclassifiedPct,
 		})
 	}
+
+	present := make(map[string]bool, len(order))
+	for _, d := range order {
+		present[d] = true
+	}
+	sawData := false
+	for d := windowStart; !d.After(windowEnd); d = d.AddDate(0, 0, 1) {
+		ds := d.Format("2006-01-02")
+		if present[ds] {
+			sawData = true
+			continue
+		}
+		if !sawData {
+			tv.ShortHistoryDays++
+		} else {
+			tv.GapDays = append(tv.GapDays, ds)
+		}
+	}
+
 	return tv
 }
 
@@ -211,7 +248,8 @@ var pageTemplate = template.Must(template.New("dashboard").Parse(`<!DOCTYPE html
 
 <h2>Trend</h2>
 <p>{{len .Trend.Days}} of the {{.Trend.RequestedWindowDays}} requested days have data.
-{{if lt (len .Trend.Days) .Trend.RequestedWindowDays}}This instance does not have a full window of history yet, so the table below is shorter than the window requested — that is not a flat trend, it is all the history there is so far.{{end}}</p>
+{{if .Trend.ShortHistoryDays}} This instance does not have a full window of history yet, so the table below is shorter than the window requested — that is not a flat trend, it is all the history there is so far.{{end}}
+{{if .Trend.GapDays}} This window also has a gap: {{len .Trend.GapDays}} day(s) inside it have no stored aggregate ({{range $i, $d := .Trend.GapDays}}{{if $i}}, {{end}}{{$d}}{{end}}) — the container may have been down that day, or there was genuinely no traffic; the aggregate alone cannot tell which, so this does not guess.{{end}}</p>
 <table border="1" cellpadding="4">
 <tr><th>Day</th><th>Total</th><th>Unclassified</th><th>By company</th><th>By self-hosted</th></tr>
 {{range .Trend.Days}}<tr>
