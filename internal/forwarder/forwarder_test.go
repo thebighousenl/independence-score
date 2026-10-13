@@ -659,7 +659,7 @@ func TestForwarderUDPConcurrencyIsBounded(t *testing.T) {
 	if got := atomic.LoadInt32(&maxInFlight); got > int32(ceiling) {
 		t.Fatalf("observed %d concurrent upstream requests, want <= %d (the configured ceiling)", got, ceiling)
 	}
-	t.Logf("ceiling=%d max-observed-concurrency=%d queries-handled=%d", ceiling, maxInFlight, handled)
+	t.Logf("ceiling=%d max-observed-concurrency=%d queries-handled=%d", ceiling, atomic.LoadInt32(&maxInFlight), atomic.LoadInt32(&handled))
 }
 
 // TestForwarderUDPDoesNotRelayStaleResponseFromReusedSocket guards the
