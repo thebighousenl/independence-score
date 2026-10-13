@@ -323,6 +323,46 @@ func (s *Store) DayShares(ctx context.Context, day string) ([]DayShare, error) {
 	return out, rows.Err()
 }
 
+// TrendRow is one bucket/owner's query count for one day of the trend
+// window.
+type TrendRow struct {
+	Day    string
+	Bucket BucketType
+	Owner  string
+	Count  int64
+}
+
+// Trend returns the classified counts for every UTC day in
+// [startDay, endDay] (both YYYY-MM-DD, inclusive) that has at least one
+// daily aggregate row. A day with no rows - because it predates the
+// instance's history, or simply had no traffic - is absent from the
+// result rather than returned as a zero row; callers must not assume
+// every calendar day in the range appears. Aggregates are long-retention
+// by design (see Prune), so a day's trend data outlives its raw rows.
+func (s *Store) Trend(ctx context.Context, startDay, endDay string) ([]TrendRow, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT day, bucket_type, owner, count FROM daily_aggregates
+		WHERE day BETWEEN ? AND ?
+		ORDER BY day ASC, count DESC
+	`, startDay, endDay)
+	if err != nil {
+		return nil, fmt.Errorf("reading trend: %w", err)
+	}
+	defer rows.Close()
+
+	var out []TrendRow
+	for rows.Next() {
+		var tr TrendRow
+		var bucket string
+		if err := rows.Scan(&tr.Day, &bucket, &tr.Owner, &tr.Count); err != nil {
+			return nil, fmt.Errorf("scanning trend row: %w", err)
+		}
+		tr.Bucket = BucketType(bucket)
+		out = append(out, tr)
+	}
+	return out, rows.Err()
+}
+
 // SaveOwnershipMap replaces the stored copy of the ownership map with the
 // entries currently loaded from ownership-map.yaml. It runs once at
 // startup, off the query path.

@@ -37,6 +37,18 @@ jobs:
       - name: Test
         run: go test ./... -count=1
 
+      # Named separately from the Test step above (which already runs
+      # these) so the query-type conformance suite - A/AAAA/CNAME/TXT/
+      # SRV/PTR/HTTPS byte-equivalence, EDNS(0)/DNSSEC, TCP fallback,
+      # malformed/hostile input, large-answer truncation, every upstream
+      # failure mode, and the documented failover behaviour - shows up as
+      # its own named, merge-gating check rather than being buried inside
+      # a generic "Test" line. A fake/local upstream only: this must
+      # never depend on reaching a real resolver like 1.1.1.1, or a
+      # flaky network would look like a conformance failure.
+      - name: Conformance suite (forwarder, failure modes, failover)
+        run: go test ./internal/forwarder/... -v -count=1
+
       # -race needs cgo, which needs a C compiler; neither engineering
       # sandbox that built M1 had one, so this is the only place it has
       # ever run. ubuntu-latest ships gcc.

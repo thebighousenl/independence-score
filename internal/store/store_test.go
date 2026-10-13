@@ -162,3 +162,85 @@ func TestPruneRemovesOldRawRowsButKeepsAggregates(t *testing.T) {
 		t.Error("expected daily aggregate to survive pruning of raw rows")
 	}
 }
+
+func TestTrendReturnsOnlyDaysWithAggregates(t *testing.T) {
+	s := openTestStore(t)
+
+	day1 := time.Now().Add(-48 * time.Hour).UTC()
+	day2 := time.Now().Add(-24 * time.Hour).UTC()
+	// day3 (today) deliberately gets no queries at all, to prove it is
+	// simply absent from Trend rather than showing up as a zero row.
+
+	s.LogQuery(QueryEvent{Hostname: "graph.facebook.com", Qtype: 1, At: day1})
+	s.LogQuery(QueryEvent{Hostname: "graph.facebook.com", Qtype: 1, At: day2})
+	s.LogQuery(QueryEvent{Hostname: "graph.facebook.com", Qtype: 1, At: day2})
+	waitForRawCount(t, s, 3)
+
+	classify := func(hostname string) (BucketType, string) { return BucketCompany, "Meta" }
+	ctx := context.Background()
+	if err := s.RollUp(ctx, classify); err != nil {
+		t.Fatalf("RollUp: %v", err)
+	}
+
+	start := day1.Add(-24 * time.Hour).Format("2006-01-02")
+	end := time.Now().UTC().Format("2006-01-02")
+	rows, err := s.Trend(ctx, start, end)
+	if err != nil {
+		t.Fatalf("Trend: %v", err)
+	}
+
+	byDay := map[string]int64{}
+	for _, r := range rows {
+		byDay[r.Day] += r.Count
+	}
+	if got := byDay[day1.Format("2006-01-02")]; got != 1 {
+		t.Errorf("day1 count = %d, want 1", got)
+	}
+	if got := byDay[day2.Format("2006-01-02")]; got != 2 {
+		t.Errorf("day2 count = %d, want 2", got)
+	}
+	if _, ok := byDay[time.Now().UTC().Format("2006-01-02")]; ok {
+		t.Error("today has no traffic and must be absent from Trend, not present as a zero row")
+	}
+
+	// Trend rows must come back in chronological order.
+	for i := 1; i < len(rows); i++ {
+		if rows[i].Day < rows[i-1].Day {
+			t.Fatalf("Trend rows out of order: %q before %q", rows[i-1].Day, rows[i].Day)
+		}
+	}
+}
+
+func TestTrendSurvivesPruningOfRawRows(t *testing.T) {
+	s := openTestStore(t)
+
+	old := time.Now().Add(-72 * time.Hour)
+	s.LogQuery(QueryEvent{Hostname: "old.example", Qtype: 1, At: old})
+	waitForRawCount(t, s, 1)
+
+	ctx := context.Background()
+	classify := func(hostname string) (BucketType, string) { return BucketUnclassified, "" }
+	if err := s.RollUp(ctx, classify); err != nil {
+		t.Fatalf("RollUp: %v", err)
+	}
+	if err := s.Prune(ctx, time.Now()); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+
+	start := old.Add(-24 * time.Hour).UTC().Format("2006-01-02")
+	end := time.Now().UTC().Format("2006-01-02")
+	rows, err := s.Trend(ctx, start, end)
+	if err != nil {
+		t.Fatalf("Trend: %v", err)
+	}
+
+	var found bool
+	for _, r := range rows {
+		if r.Day == old.UTC().Format("2006-01-02") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected the pruned day's aggregate to still appear in Trend")
+	}
+}
