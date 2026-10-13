@@ -61,10 +61,30 @@ type Server struct {
 const maxUDPSize = 65535
 const defaultMaxConcurrentUDP = 256
 
-// ListenAndServe starts the UDP and TCP listeners and blocks, forwarding
-// queries until one of the listeners fails. It closes both listeners
-// before returning.
+// ListenAndServe binds the UDP and TCP listeners, then blocks forwarding
+// queries until one of them fails. It closes both listeners before
+// returning. Equivalent to calling Listen followed by Serve.
 func (s *Server) ListenAndServe() error {
+	if err := s.Listen(); err != nil {
+		return err
+	}
+	return s.Serve()
+}
+
+// Listen applies defaults and binds the UDP and TCP sockets, returning
+// once both are ready to accept queries. It does not block serving them -
+// call Serve for that.
+//
+// Splitting bind from serve gives callers (tests, mainly) a real
+// synchronization point: every field Close reads (udpConn, tcpLn,
+// udpPool) is written here, in the caller's own goroutine, before Serve
+// is ever started. A caller that waits for Listen to return before
+// spawning `go s.Serve()` and concurrently calling Close needs no other
+// signal - the goroutine-creation boundary alone establishes the
+// happens-before relationship. The previous single ListenAndServe forced
+// callers that wanted this concurrently (e.g. for shutdown) to guess at a
+// safe delay, which raced Close against these same field writes.
+func (s *Server) Listen() error {
 	if s.Timeout == 0 {
 		s.Timeout = 5 * time.Second
 	}
@@ -89,12 +109,18 @@ func (s *Server) ListenAndServe() error {
 		return err
 	}
 	s.tcpLn = tcpLn
+	return nil
+}
 
+// Serve forwards queries on the sockets bound by Listen until one of them
+// fails, then closes both before returning. Listen must have already
+// completed successfully.
+func (s *Server) Serve() error {
 	errCh := make(chan error, 2)
-	go func() { errCh <- s.serveUDP(udpConn) }()
-	go func() { errCh <- s.serveTCP(tcpLn) }()
+	go func() { errCh <- s.serveUDP(s.udpConn) }()
+	go func() { errCh <- s.serveTCP(s.tcpLn) }()
 
-	err = <-errCh
+	err := <-errCh
 	s.Close()
 	return err
 }

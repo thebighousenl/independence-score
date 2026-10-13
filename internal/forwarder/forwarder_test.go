@@ -196,17 +196,14 @@ func startForwarder(t *testing.T, upstream string) (addr string, logger *recordi
 		Timeout:  2 * time.Second,
 	}
 
-	ready := make(chan struct{})
-	go func() {
-		// ListenAndServe blocks; give it a moment to bind before we
-		// signal ready, and close it when the test ends.
-		go func() {
-			time.Sleep(20 * time.Millisecond)
-			close(ready)
-		}()
-		srv.ListenAndServe()
-	}()
-	<-ready
+	// Listen binds synchronously in this goroutine, so by the time it
+	// returns every field Close touches is already written - Serve can
+	// safely run in the background with Close callable at any point
+	// after this, with no sleep-based guess required.
+	if err := srv.Listen(); err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go srv.Serve()
 	t.Cleanup(srv.Close)
 
 	return srv.Addr, logger
@@ -233,15 +230,10 @@ func startForwarderWithCap(t *testing.T, upstream string, maxConcurrentUDP int) 
 		MaxConcurrentUDP: maxConcurrentUDP,
 	}
 
-	ready := make(chan struct{})
-	go func() {
-		go func() {
-			time.Sleep(20 * time.Millisecond)
-			close(ready)
-		}()
-		srv.ListenAndServe()
-	}()
-	<-ready
+	if err := srv.Listen(); err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go srv.Serve()
 	t.Cleanup(srv.Close)
 
 	return srv.Addr, srv
@@ -512,11 +504,20 @@ func TestForwarderUDPConcurrencyIsBounded(t *testing.T) {
 				// ceiling did not hold, many more than `ceiling`
 				// requests would overlap in flight.
 				time.Sleep(20 * time.Millisecond)
-				if resp := answerFor(query); resp != nil {
-					udpConn.WriteTo(resp, addr)
-				}
+				resp := answerFor(query)
+				// Decrement before writing the response, not after:
+				// once the response is on the wire the forwarder can
+				// complete its round trip, free its semaphore slot,
+				// and admit the next query - all before this goroutine
+				// gets scheduled again to run its own decrement. That
+				// ordering let an admission the ceiling genuinely
+				// bounded look, from this side, like a transient
+				// overshoot.
 				atomic.AddInt32(&inFlight, -1)
 				atomic.AddInt32(&handled, 1)
+				if resp != nil {
+					udpConn.WriteTo(resp, addr)
+				}
 			}()
 		}
 	}()
