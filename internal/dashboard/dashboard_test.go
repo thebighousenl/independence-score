@@ -2,10 +2,12 @@ package dashboard
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thebighousenl/independence-score/internal/store"
 )
@@ -112,6 +114,44 @@ func TestDashboardTrendRendersShortHistoryHonestly(t *testing.T) {
 	}
 }
 
+func TestDashboardTrendDistinguishesGapFromShortHistory(t *testing.T) {
+	// A full 14-day window except day 7, which has no stored aggregate.
+	// This instance has run the whole window - it is not a short history -
+	// so the gap must be named as a gap, not reported as "no history yet".
+	var rows []store.TrendRow
+	for day := 1; day <= 14; day++ {
+		if day == 7 {
+			continue
+		}
+		rows = append(rows, store.TrendRow{
+			Day:    fmt.Sprintf("2026-10-%02d", day),
+			Bucket: store.BucketCompany,
+			Owner:  "Meta",
+			Count:  1,
+		})
+	}
+	h := &Handler{Store: fakeStore{trend: rows}}
+
+	req := httptest.NewRequest(http.MethodGet, "/?day=2026-10-14&trend_days=14", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+
+	if strings.Contains(body, "does not have a full window of history yet") {
+		t.Errorf("a gap inside an otherwise full window must not be reported as a short history, got:\n%s", body)
+	}
+	if !strings.Contains(body, "2026-10-07") {
+		t.Errorf("expected the gap day to be named, got:\n%s", body)
+	}
+	if !strings.Contains(body, "This window also has a gap") {
+		t.Errorf("expected gap wording, got:\n%s", body)
+	}
+}
+
 func TestDashboardHonoursTrendDaysQueryParam(t *testing.T) {
 	h := &Handler{Store: fakeStore{trend: nil}}
 
@@ -134,7 +174,9 @@ func TestBuildTrendViewGroupsRowsByDayAndKeepsChronologicalOrder(t *testing.T) {
 		{Day: "2026-10-11", Bucket: store.BucketSelfHosted, Owner: "Nextcloud", Count: 2},
 	}
 
-	tv := buildTrendView(14, rows)
+	windowStart, _ := time.Parse("2006-01-02", "2026-09-29")
+	windowEnd, _ := time.Parse("2006-01-02", "2026-10-12")
+	tv := buildTrendView(14, windowStart, windowEnd, rows)
 
 	if len(tv.Days) != 3 {
 		t.Fatalf("got %d days, want 3", len(tv.Days))

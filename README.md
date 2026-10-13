@@ -3,7 +3,7 @@
 **Status: M1 ("I get a number") is done** — a real user ran this as primary
 DNS on a real home network for 24 hours with nothing breaking, and the
 dashboard showed non-zero classified shares. **M2 ("I trust it, and it
-remembers") is in progress**: the query-type conformance suite, documented
+remembers") is done**: the query-type conformance suite, documented
 secondary-DNS failover, and the multi-day trend view below. Per the project
 brief, M2 — not M1 — is the bar for a public release. Keep a secondary DNS
 entry on your router regardless (see Failover below); this is one container,
@@ -169,7 +169,7 @@ Milestones). No database server, no queue, no external service.
 
 - **M1 ("I get a number") - done.** Forwarder, store, classifier, seed
   ownership map, one-day dashboard.
-- **M2 ("I trust it, and it remembers") - in progress.** Full query-type
+- **M2 ("I trust it, and it remembers") - done.** Full query-type
   conformance suite in CI (see `internal/forwarder`'s conformance and
   failover tests), documented secondary-DNS failover, multi-day trend
   view. This, not M1, is the bar for a public release.
