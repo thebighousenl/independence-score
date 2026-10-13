@@ -68,6 +68,12 @@ Configuration is by environment variable:
 | `RAW_RETENTION`       | `48h`                                        | How long raw query rows are kept          |
 | `ROLLUP_INTERVAL`     | `10s`                                        | How often new rows are classified         |
 
+The two duration variables use Go's duration syntax — `48h`, `30m`, `10s`.
+Day units are not supported: write a week as `168h`, not `7d`. A value that
+cannot be parsed is ignored and the default is used instead, with a line
+saying so in the container logs (`docker logs independence-score`), so check
+there if a retention or interval you set does not seem to apply.
+
 ### Troubleshooting
 
 **`docker run` fails with `address already in use` on port 53.** Something on the

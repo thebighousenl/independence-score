@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"os"
 	"time"
 )
@@ -41,6 +42,11 @@ func getEnvDuration(key string, def time.Duration) time.Duration {
 	}
 	d, err := time.ParseDuration(v)
 	if err != nil {
+		// Falling back silently would hide a misconfiguration behind a
+		// plausible-looking dashboard: RAW_RETENTION=7d is not a Go
+		// duration, so the retention a user asked for would quietly not
+		// be the retention they got.
+		log.Printf("ignoring %s=%q: not a valid duration (use Go syntax, e.g. 48h, 30m, 10s); using %s", key, v, def)
 		return def
 	}
 	return d
