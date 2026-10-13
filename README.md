@@ -1,10 +1,13 @@
 # Independence Score
 
-**Status: M1 ("I get a number"). The forwarder, store, classifier and a
-one-day dashboard work and are covered by tests, but this has not yet run
-as primary DNS on a real home network for 24 hours. Keep a secondary DNS
-entry on your router before you try it (see below), and do not rely on it
-yet as your only resolver.**
+**Status: M1 ("I get a number") is done** — a real user ran this as primary
+DNS on a real home network for 24 hours with nothing breaking, and the
+dashboard showed non-zero classified shares. **M2 ("I trust it, and it
+remembers") is in progress**: the query-type conformance suite, documented
+secondary-DNS failover, and the multi-day trend view below. Per the project
+brief, M2 — not M1 — is the bar for a public release. Keep a secondary DNS
+entry on your router regardless (see Failover below); this is one container,
+not a resilient resolver.
 
 You run your own network, and you already block ads. This tool answers the question
 blocking does not: *of the DNS traffic that gets through, how much still lands in
@@ -45,9 +48,13 @@ set a **secondary** DNS entry to a resolver you already trust (your ISP's,
 optional: this is one container, not a resilient resolver, and your network
 should keep working if it is ever down or being restarted.
 
-Open `http://<container-host>:8080/` for the one-day dashboard: shares by
-company, by self-hosted category, and the unclassified share, which is always
-shown and never folded into either bucket.
+Open `http://<container-host>:8080/` for the dashboard: today's shares by
+company, by self-hosted category, and the unclassified share (always shown,
+never folded into either bucket), plus a multi-day trend over the stored
+daily aggregates beneath it. The trend defaults to a 14-day window
+(`?trend_days=N` to change it) and states plainly how many of the requested
+days actually have data — a new instance with one day of history renders as
+one row, not a chart implying a longer trend than it has.
 
 Configuration is by environment variable:
 
@@ -105,6 +112,46 @@ published on Docker Hub and `go.sum` is committed, so a missing base image or an
 untracked `go.sum` are not expected causes of a `docker build` failure. A port 53
 conflict on the host is the one most new users will actually hit.
 
+### Failover
+
+This is one container, not a resilient resolver, so your router's **secondary**
+DNS entry is how the network survives this container being unavailable. Failover
+only works because a stub resolver's normal trigger for trying the secondary
+entry - getting no answer at all from the primary - actually fires. The
+forwarder is built so that every unavailability case it can be in produces
+exactly that: silence, never a fabricated answer.
+
+There are two situations that look similar from a router's point of view but
+are different problems to fix:
+
+- **The container itself is down** (stopped, crashed, restarting). Nothing is
+  listening on port 53 at all. A UDP query gets no response until the client's
+  own timeout fires; a TCP connection attempt is refused immediately. Either
+  way, the client moves on to the secondary entry.
+- **The container is up, but its configured upstream (`UPSTREAM_DNS`) is
+  unreachable** - the upstream is down, refusing connections, or not
+  responding. The forwarder's listeners are still open and still accepting
+  queries, but every query it tries to forward fails. It does **not**
+  synthesise a SERVFAIL, an empty NOERROR, or any other answer to paper over
+  that failure - a client that got any valid DNS message would treat it as
+  authoritative and would not retry on the secondary entry, which is worse
+  than the container being down outright. So this case produces the same
+  silence a down container does, even though the process is alive.
+
+To tell the two apart, check the container itself (`docker ps`, `docker logs`)
+rather than inferring it from the client's behaviour, which looks identical in
+both cases. If the container is running and its logs show repeated `upstream
+... forward failed` lines, the second case is what's happening, and the fix is
+to check `UPSTREAM_DNS` reachability from the container's network - not to
+restart the container.
+
+**The honest limit:** failover only works for a device that actually honours
+its secondary DNS entry. A device that resolves once, caches this container's
+address, and does not fall back to the secondary when that address stops
+answering will lose resolution until it retries DNS on its own. This tool does
+not and cannot fix that; it is a property of the client device, not something
+a DNS forwarder can work around.
+
 ### What this cannot see
 
 Any device that speaks DNS-over-HTTPS or DNS-over-TLS directly to a public
@@ -122,8 +169,9 @@ Milestones). No database server, no queue, no external service.
 
 - **M1 ("I get a number") - done.** Forwarder, store, classifier, seed
   ownership map, one-day dashboard.
-- **M2 ("I trust it, and it remembers") - not started.** Full query-type
-  conformance suite in CI, documented secondary-DNS failover, multi-day trend
+- **M2 ("I trust it, and it remembers") - in progress.** Full query-type
+  conformance suite in CI (see `internal/forwarder`'s conformance and
+  failover tests), documented secondary-DNS failover, multi-day trend
   view. This, not M1, is the bar for a public release.
 - **M3 ("It tells me when something changed") - not started.** Weekly diff
   job with webhook/email digests.
