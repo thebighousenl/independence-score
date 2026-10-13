@@ -61,6 +61,50 @@ Configuration is by environment variable:
 | `RAW_RETENTION`       | `48h`                                        | How long raw query rows are kept          |
 | `ROLLUP_INTERVAL`     | `10s`                                        | How often new rows are classified         |
 
+### Troubleshooting
+
+**`docker run` fails with `address already in use` on port 53.** Something on the
+host is already holding port 53. This is the most common first-run failure, not a
+build problem.
+
+Detect it:
+
+```
+sudo ss -lunp 'sport = :53'
+```
+
+If that prints a process, something is already bound to port 53 on the host.
+
+- **`systemd-resolved`** (the default on Ubuntu and most Debian derivatives) runs a
+  stub resolver on `127.0.0.1:53` by default. Fix:
+
+  ```
+  sudo sed -i 's/^#\?DNSStubListener=.*/DNSStubListener=no/' /etc/systemd/resolved.conf
+  sudo systemctl restart systemd-resolved
+  ```
+
+  `/etc/resolv.conf` is usually a symlink to `/run/systemd/resolve/stub-resolv.conf`
+  managed by `systemd-resolved`; after disabling the stub listener, make sure it (or
+  whatever `/etc/resolv.conf` points to) still has a real `nameserver` line — for
+  example `nameserver 1.1.1.1` — so the host itself can still resolve names while
+  this container is starting.
+
+  To undo: set `DNSStubListener=yes` back in `/etc/systemd/resolved.conf` (or remove
+  the line to restore the default) and `sudo systemctl restart systemd-resolved`.
+
+- **`dnsmasq`** or a locally-installed **Pi-hole** on the same host also bind port
+  53. If you are already running either of those on this machine, you don't want
+  this container competing with them for the port anyway — either run Pi-hole in
+  its own container and point this tool's `UPSTREAM_DNS` at it, or run this tool on
+  a different host. Stopping the conflicting service (`sudo systemctl stop dnsmasq`
+  or stopping the Pi-hole container) only relocates the same problem; picking which
+  one should actually own port 53 on this host is the real fix.
+
+Both `golang:1.26-alpine` and `alpine:3.20` (the Dockerfile's base images) are
+published on Docker Hub and `go.sum` is committed, so a missing base image or an
+untracked `go.sum` are not expected causes of a `docker build` failure. A port 53
+conflict on the host is the one most new users will actually hit.
+
 ### What this cannot see
 
 Any device that speaks DNS-over-HTTPS or DNS-over-TLS directly to a public

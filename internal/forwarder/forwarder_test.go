@@ -2,9 +2,11 @@ package forwarder
 
 import (
 	"bytes"
+	"fmt"
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -194,20 +196,47 @@ func startForwarder(t *testing.T, upstream string) (addr string, logger *recordi
 		Timeout:  2 * time.Second,
 	}
 
-	ready := make(chan struct{})
-	go func() {
-		// ListenAndServe blocks; give it a moment to bind before we
-		// signal ready, and close it when the test ends.
-		go func() {
-			time.Sleep(20 * time.Millisecond)
-			close(ready)
-		}()
-		srv.ListenAndServe()
-	}()
-	<-ready
+	// Listen binds synchronously in this goroutine, so by the time it
+	// returns every field Close touches is already written - Serve can
+	// safely run in the background with Close callable at any point
+	// after this, with no sleep-based guess required.
+	if err := srv.Listen(); err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go srv.Serve()
 	t.Cleanup(srv.Close)
 
 	return srv.Addr, logger
+}
+
+// startForwarderWithCap is like startForwarder but lets a test pin
+// MaxConcurrentUDP below its production default, so a concurrency test
+// can exercise the ceiling without sending thousands of queries.
+func startForwarderWithCap(t *testing.T, upstream string, maxConcurrentUDP int) (addr string, srv *Server) {
+	t.Helper()
+
+	udpConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("picking forwarder port: %v", err)
+	}
+	port := udpConn.LocalAddr().(*net.UDPAddr).Port
+	udpConn.Close()
+
+	srv = &Server{
+		Addr:             "127.0.0.1:" + strconv.Itoa(port),
+		Upstream:         upstream,
+		Logger:           NoopLogger{},
+		Timeout:          5 * time.Second,
+		MaxConcurrentUDP: maxConcurrentUDP,
+	}
+
+	if err := srv.Listen(); err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go srv.Serve()
+	t.Cleanup(srv.Close)
+
+	return srv.Addr, srv
 }
 
 type recordingLogger struct {
@@ -430,5 +459,178 @@ func TestForwarderForwardsUnparseableQueryUnchanged(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if n := logger.count(); n != 0 {
 		t.Fatalf("expected 0 logged queries for unparseable input, got %d", n)
+	}
+}
+
+// TestForwarderUDPConcurrencyIsBounded drives far more concurrent UDP
+// queries than a pinned MaxConcurrentUDP ceiling, against an upstream that
+// holds each request open briefly so true concurrency is exercised, and
+// proves two things at once: the ceiling actually holds (goroutines and
+// upstream sockets never exceed it), and the forward-only guarantee is not
+// broken to enforce it - every single query still gets its upstream
+// answer, none are dropped, rewritten, or answered locally.
+func TestForwarderUDPConcurrencyIsBounded(t *testing.T) {
+	const ceiling = 4
+	const totalQueries = 40
+
+	udpConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listening fake upstream: %v", err)
+	}
+	t.Cleanup(func() { udpConn.Close() })
+
+	var inFlight, maxInFlight, handled int32
+	go func() {
+		buf := make([]byte, maxUDPSize)
+		for {
+			n, addr, err := udpConn.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			query := make([]byte, n)
+			copy(query, buf[:n])
+			go func() {
+				cur := atomic.AddInt32(&inFlight, 1)
+				for {
+					old := atomic.LoadInt32(&maxInFlight)
+					if cur <= old {
+						break
+					}
+					if atomic.CompareAndSwapInt32(&maxInFlight, old, cur) {
+						break
+					}
+				}
+				// Hold the request open long enough that, if the
+				// ceiling did not hold, many more than `ceiling`
+				// requests would overlap in flight.
+				time.Sleep(20 * time.Millisecond)
+				resp := answerFor(query)
+				// Decrement before writing the response, not after:
+				// once the response is on the wire the forwarder can
+				// complete its round trip, free its semaphore slot,
+				// and admit the next query - all before this goroutine
+				// gets scheduled again to run its own decrement. That
+				// ordering let an admission the ceiling genuinely
+				// bounded look, from this side, like a transient
+				// overshoot.
+				atomic.AddInt32(&inFlight, -1)
+				atomic.AddInt32(&handled, 1)
+				if resp != nil {
+					udpConn.WriteTo(resp, addr)
+				}
+			}()
+		}
+	}()
+
+	addr, _ := startForwarderWithCap(t, udpConn.LocalAddr().String(), ceiling)
+
+	var wg sync.WaitGroup
+	var successes int32
+	for i := 0; i < totalQueries; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			q := newQuestion(fmt.Sprintf("flood-%d.example.com", i), dns.TypeA)
+			c := &dns.Client{Net: "udp", Timeout: 5 * time.Second}
+			resp, _, err := c.Exchange(q, addr)
+			if err != nil {
+				t.Errorf("query %d: exchange failed: %v", i, err)
+				return
+			}
+			if resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 1 {
+				t.Errorf("query %d: unexpected response: %+v", i, resp)
+				return
+			}
+			atomic.AddInt32(&successes, 1)
+		}(i)
+	}
+	wg.Wait()
+
+	if got := int(successes); got != totalQueries {
+		t.Fatalf("got %d successful answers, want all %d queries answered", got, totalQueries)
+	}
+	if got := atomic.LoadInt32(&maxInFlight); got > int32(ceiling) {
+		t.Fatalf("observed %d concurrent upstream requests, want <= %d (the configured ceiling)", got, ceiling)
+	}
+	t.Logf("ceiling=%d max-observed-concurrency=%d queries-handled=%d", ceiling, maxInFlight, handled)
+}
+
+// TestForwarderUDPDoesNotRelayStaleResponseFromReusedSocket guards the
+// correctness cost of pooling upstream UDP sockets: once a socket is
+// reused for a second query, a stale duplicate answer to the *first*
+// query can still be sitting in its receive buffer. Pinning
+// MaxConcurrentUDP to 1 forces every query through the same pooled
+// socket, so this reproduces that ordering deterministically. The fake
+// upstream deliberately resends query A's answer a second time, timed to
+// land after query A has already been answered but before query B's
+// request reaches it - exactly the race that would let a reused socket
+// serve the wrong client's answer if responses were not matched against
+// the query's own transaction ID.
+func TestForwarderUDPDoesNotRelayStaleResponseFromReusedSocket(t *testing.T) {
+	udpConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listening fake upstream: %v", err)
+	}
+	t.Cleanup(func() { udpConn.Close() })
+
+	go func() {
+		buf := make([]byte, maxUDPSize)
+		for {
+			n, addr, err := udpConn.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			query := make([]byte, n)
+			copy(query, buf[:n])
+			resp := answerFor(query)
+			if resp == nil {
+				continue
+			}
+			udpConn.WriteTo(resp, addr)
+			if bytes.Contains(query, []byte("stale-trigger")) {
+				// Resend the same answer again shortly after: a
+				// duplicate that lands in the pooled socket's
+				// receive buffer only after this round trip has
+				// already completed and the socket has been
+				// returned to the pool.
+				go func() {
+					time.Sleep(20 * time.Millisecond)
+					udpConn.WriteTo(resp, addr)
+				}()
+			}
+		}
+	}()
+
+	addr, _ := startForwarderWithCap(t, udpConn.LocalAddr().String(), 1)
+
+	c := &dns.Client{Net: "udp", Timeout: 5 * time.Second}
+
+	qA := newQuestion("stale-trigger.example.com", dns.TypeA)
+	respA, _, err := c.Exchange(qA, addr)
+	if err != nil {
+		t.Fatalf("query A: exchange failed: %v", err)
+	}
+	if len(respA.Answer) != 1 || respA.Answer[0].Header().Name != "stale-trigger.example.com." {
+		t.Fatalf("query A: unexpected response: %+v", respA)
+	}
+
+	// Give the fake upstream's delayed duplicate time to land in the
+	// (now pooled, idle) socket's receive buffer before query B reuses
+	// it.
+	time.Sleep(40 * time.Millisecond)
+
+	qB := newQuestion("real-query-b.example.com", dns.TypeAAAA)
+	respB, _, err := c.Exchange(qB, addr)
+	if err != nil {
+		t.Fatalf("query B: exchange failed: %v", err)
+	}
+	if len(respB.Answer) != 1 {
+		t.Fatalf("query B: unexpected response: %+v", respB)
+	}
+	if got := respB.Answer[0].Header().Name; got != "real-query-b.example.com." {
+		t.Fatalf("query B got an answer for %q - the stale duplicate for query A was relayed to the wrong query", got)
+	}
+	if respB.Answer[0].Header().Rrtype != dns.TypeAAAA {
+		t.Fatalf("query B: expected an AAAA answer matching its own question, got rrtype %d (stale A-record answer leaked across queries)", respB.Answer[0].Header().Rrtype)
 	}
 }

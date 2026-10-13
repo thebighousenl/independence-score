@@ -36,3 +36,66 @@ jobs:
       # fails here.
       - name: Test
         run: go test ./... -count=1
+
+      # -race needs cgo, which needs a C compiler; neither engineering
+      # sandbox that built M1 had one, so this is the only place it has
+      # ever run. ubuntu-latest ships gcc.
+      - name: Test (race detector)
+        run: go test -race ./... -count=1
+
+  # Neither engineering sandbox that built M1 had a container runtime, so
+  # `docker build`/`docker run` were never actually exercised. This job
+  # proves the image builds and that a container built from it resolves
+  # real queries over both UDP and TCP and serves the dashboard - the
+  # same three things a new user's first run depends on.
+  docker-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t independence-score:ci .
+
+      - name: Install dig
+        run: sudo apt-get update && sudo apt-get install -y dnsutils
+
+      - name: Run container
+        run: |
+          docker run -d --name independence-score-ci \
+            -p 15353:53/udp -p 15353:53/tcp -p 18080:8080 \
+            -e UPSTREAM_DNS=1.1.1.1:53 \
+            independence-score:ci
+
+      - name: Wait for dashboard to come up
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fs http://127.0.0.1:18080/ >/dev/null 2>&1; then
+              echo "dashboard is up after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "dashboard never came up"
+          docker logs independence-score-ci
+          exit 1
+
+      - name: Resolve a real name over UDP
+        run: |
+          dig @127.0.0.1 -p 15353 example.com +time=5 +tries=3 | tee /tmp/udp.out
+          grep -q "ANSWER SECTION" /tmp/udp.out
+
+      - name: Resolve a real name over TCP
+        run: |
+          dig +tcp @127.0.0.1 -p 15353 example.com +time=5 +tries=3 | tee /tmp/tcp.out
+          grep -q "ANSWER SECTION" /tmp/tcp.out
+
+      - name: Fetch the dashboard
+        run: curl -fs http://127.0.0.1:18080/ | grep -q "Independence Score"
+
+      - name: Container logs
+        if: always()
+        run: docker logs independence-score-ci || true
+
+      - name: Clean up
+        if: always()
+        run: docker rm -f independence-score-ci || true
