@@ -386,26 +386,133 @@ func TestForwarderPreservesEDNS0AndDNSSEC(t *testing.T) {
 	}
 }
 
-func TestForwarderByteForByteUDPResponse(t *testing.T) {
-	// Verifies the forwarder does not repack or otherwise alter the
-	// upstream's wire bytes: ask the fake upstream directly, then ask it
-	// again through the forwarder, and compare the two answers'
-	// marshaled RRs rather than raw bytes (the transaction ID differs
-	// legitimately per query).
+// exchangeRawUDP sends q's packed wire bytes to addr over UDP and returns
+// the raw response bytes, with no parsing on the way out or back in. This
+// is what makes the comparisons in TestForwarderUDPByteForByteAcrossAllTypes
+// meaningful: dns.Client.Exchange decodes the response into a *dns.Msg and
+// then re-encodes it on demand, which would hide a forwarder bug that
+// corrupts bytes a round trip through the library happens to tolerate.
+func exchangeRawUDP(t *testing.T, addr string, q *dns.Msg) []byte {
+	t.Helper()
+	packed, err := q.Pack()
+	if err != nil {
+		t.Fatalf("packing query: %v", err)
+	}
+
+	conn, err := net.Dial("udp", addr)
+	if err != nil {
+		t.Fatalf("dial %s: %v", addr, err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+	if _, err := conn.Write(packed); err != nil {
+		t.Fatalf("write query: %v", err)
+	}
+	buf := make([]byte, maxUDPSize)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	return buf[:n]
+}
+
+// zeroTxID clears the 2-byte DNS transaction ID so two otherwise-identical
+// messages compare equal regardless of which random ID their query used.
+// This is the only field TestForwarderUDPByteForByteAcrossAllTypes allows to
+// differ: the client generates a fresh random ID per query, and the
+// upstream's reply always mirrors whichever ID it was asked with, so the
+// direct and via-forwarder exchanges are never going to share one.
+func zeroTxID(msg []byte) []byte {
+	out := make([]byte, len(msg))
+	copy(out, msg)
+	if len(out) >= 2 {
+		out[0] = 0
+		out[1] = 0
+	}
+	return out
+}
+
+// TestForwarderUDPByteForByteAcrossAllTypes makes byte-level equivalence
+// the rule for every conformance-scoped record type, not a single sampled
+// case: for each type, the exact bytes a client gets through the forwarder
+// must equal the exact bytes it gets asking the upstream directly, modulo
+// the transaction ID.
+func TestForwarderUDPByteForByteAcrossAllTypes(t *testing.T) {
 	upstream := startFakeUpstream(t)
 	addr, _ := startForwarder(t, upstream.addr)
 
-	q1 := newQuestion("byteforbyte.example.com", dns.TypeA)
-	direct := queryUDP(t, upstream.addr, q1)
+	for _, tc := range conformanceCases {
+		t.Run(tc.name, func(t *testing.T) {
+			name := "byteforbyte-" + tc.name + ".example.com"
 
-	q2 := newQuestion("byteforbyte.example.com", dns.TypeA)
-	viaForwarder := queryUDP(t, addr, q2)
+			direct := exchangeRawUDP(t, upstream.addr, newQuestion(name, tc.qtype))
+			viaForwarder := exchangeRawUDP(t, addr, newQuestion(name, tc.qtype))
 
-	if len(direct.Answer) != 1 || len(viaForwarder.Answer) != 1 {
-		t.Fatalf("expected exactly one answer each: direct=%d viaForwarder=%d", len(direct.Answer), len(viaForwarder.Answer))
+			if !bytes.Equal(zeroTxID(direct), zeroTxID(viaForwarder)) {
+				t.Fatalf("byte mismatch for %s (transaction ID excluded):\ndirect:        % x\nvia forwarder: % x", tc.name, direct, viaForwarder)
+			}
+		})
 	}
-	if direct.Answer[0].String() != viaForwarder.Answer[0].String() {
-		t.Fatalf("answer mismatch:\ndirect:       %s\nvia forwarder: %s", direct.Answer[0].String(), viaForwarder.Answer[0].String())
+}
+
+// TestForwarderUDPByteForByteWithEDNS0DNSSEC extends the same byte-level
+// rule to a query carrying EDNS(0) with the DNSSEC OK bit set, where the
+// upstream's reply includes an RRSIG - the forwarder must relay the OPT
+// pseudo-record and the signature unchanged, not just the plain answer.
+func TestForwarderUDPByteForByteWithEDNS0DNSSEC(t *testing.T) {
+	upstream := startFakeUpstream(t)
+	addr, _ := startForwarder(t, upstream.addr)
+
+	newEdnsQuestion := func(name string) *dns.Msg {
+		q := newQuestion(name, dns.TypeA)
+		q.SetEdns0(4096, true)
+		return q
+	}
+
+	direct := exchangeRawUDP(t, upstream.addr, newEdnsQuestion("byteforbyte-edns0.example.com"))
+	viaForwarder := exchangeRawUDP(t, addr, newEdnsQuestion("byteforbyte-edns0.example.com"))
+
+	if !bytes.Equal(zeroTxID(direct), zeroTxID(viaForwarder)) {
+		t.Fatalf("EDNS0/DNSSEC byte mismatch (transaction ID excluded):\ndirect:        % x\nvia forwarder: % x", direct, viaForwarder)
+	}
+}
+
+// TestForwarderTCPByteForByte is the TCP-fallback analogue of the UDP
+// byte-equivalence suite above: the length-prefixed message the client
+// reads back over TCP must match the upstream's own TCP answer exactly,
+// modulo the transaction ID.
+func TestForwarderTCPByteForByte(t *testing.T) {
+	upstream := startFakeUpstream(t)
+	addr, _ := startForwarder(t, upstream.addr)
+
+	exchangeRawTCP := func(t *testing.T, target string, q *dns.Msg) []byte {
+		t.Helper()
+		packed, err := q.Pack()
+		if err != nil {
+			t.Fatalf("packing query: %v", err)
+		}
+		conn, err := net.Dial("tcp", target)
+		if err != nil {
+			t.Fatalf("dial %s: %v", target, err)
+		}
+		defer conn.Close()
+		conn.SetDeadline(time.Now().Add(2 * time.Second))
+		if err := writeTCPMessage(conn, packed); err != nil {
+			t.Fatalf("write query: %v", err)
+		}
+		resp, err := readTCPMessage(conn)
+		if err != nil {
+			t.Fatalf("read response: %v", err)
+		}
+		return resp
+	}
+
+	direct := exchangeRawTCP(t, upstream.addr, newQuestion("byteforbyte-tcp.example.com", dns.TypeA))
+	viaForwarder := exchangeRawTCP(t, addr, newQuestion("byteforbyte-tcp.example.com", dns.TypeA))
+
+	if !bytes.Equal(zeroTxID(direct), zeroTxID(viaForwarder)) {
+		t.Fatalf("TCP byte mismatch (transaction ID excluded):\ndirect:        % x\nvia forwarder: % x", direct, viaForwarder)
 	}
 }
 
