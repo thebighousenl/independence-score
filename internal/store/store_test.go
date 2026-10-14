@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -242,5 +243,170 @@ func TestTrendSurvivesPruningOfRawRows(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected the pruned day's aggregate to still appear in Trend")
+	}
+}
+
+func TestRegisteredDomainCollapsesSubdomainsAndHandlesMultiLabelSuffixes(t *testing.T) {
+	for _, tc := range []struct {
+		hostname string
+		want     string
+	}{
+		{"www.example.com", "example.com"},
+		{"a.b.c.example.com", "example.com"},
+		{"example.com", "example.com"},
+		// co.uk is a multi-label public suffix; a naive "last two labels"
+		// rule would wrongly group every co.uk site under "co.uk".
+		{"shop.example.co.uk", "example.co.uk"},
+		// A bare public suffix has no registered domain to collapse to;
+		// grouping must fall back to the hostname itself rather than error.
+		{"co.uk", "co.uk"},
+		{"EXAMPLE.COM.", "example.com"},
+	} {
+		if got := registeredDomain(tc.hostname); got != tc.want {
+			t.Errorf("registeredDomain(%q) = %q, want %q", tc.hostname, got, tc.want)
+		}
+	}
+}
+
+func TestRollUpGroupsUnclassifiedTrafficByRegisteredDomain(t *testing.T) {
+	s := openTestStore(t)
+
+	day := time.Now().UTC()
+	s.LogQuery(QueryEvent{Hostname: "a.unknown-one.example", Qtype: 1, At: day})
+	s.LogQuery(QueryEvent{Hostname: "b.unknown-one.example", Qtype: 1, At: day})
+	s.LogQuery(QueryEvent{Hostname: "unknown-two.example", Qtype: 1, At: day})
+	s.LogQuery(QueryEvent{Hostname: "known.example", Qtype: 1, At: day})
+	waitForRawCount(t, s, 4)
+
+	classify := func(hostname string) (BucketType, string) {
+		if hostname == "known.example" {
+			return BucketCompany, "KnownCo"
+		}
+		return BucketUnclassified, ""
+	}
+
+	ctx := context.Background()
+	if err := s.RollUp(ctx, classify); err != nil {
+		t.Fatalf("RollUp: %v", err)
+	}
+
+	got, err := s.UnclassifiedDomainsHistory(ctx, day.Format("2006-01-02"))
+	if err != nil {
+		t.Fatalf("UnclassifiedDomainsHistory: %v", err)
+	}
+
+	counts := map[string]int64{}
+	for _, dc := range got {
+		counts[dc.Domain] = dc.Count
+	}
+	if counts["unknown-one.example"] != 2 {
+		t.Errorf("unknown-one.example = %d, want 2 (two subdomains collapsed)", counts["unknown-one.example"])
+	}
+	if counts["unknown-two.example"] != 1 {
+		t.Errorf("unknown-two.example = %d, want 1", counts["unknown-two.example"])
+	}
+	if _, known := counts["known.example"]; known {
+		t.Errorf("known.example must not appear in unclassified domain history, got %+v", got)
+	}
+}
+
+func TestRollUpCapsUnclassifiedDomainsPerDay(t *testing.T) {
+	s := openTestStore(t)
+
+	day := time.Now().UTC()
+	// More distinct unclassified domains than unclassifiedDomainsCap,
+	// each with a different count so the top N are unambiguous.
+	total := unclassifiedDomainsCap + 10
+	for i := 0; i < total; i++ {
+		host := fmt.Sprintf("site-%03d.example", i)
+		// Higher index => more queries, so the lowest-index (lowest
+		// count) sites are the ones that must be trimmed away.
+		for n := 0; n < i+1; n++ {
+			s.LogQuery(QueryEvent{Hostname: host, Qtype: 1, At: day})
+		}
+	}
+	waitForRawCount(t, s, total*(total+1)/2)
+
+	classify := func(hostname string) (BucketType, string) { return BucketUnclassified, "" }
+	ctx := context.Background()
+	if err := s.RollUp(ctx, classify); err != nil {
+		t.Fatalf("RollUp: %v", err)
+	}
+
+	got, err := s.UnclassifiedDomainsHistory(ctx, day.Format("2006-01-02"))
+	if err != nil {
+		t.Fatalf("UnclassifiedDomainsHistory: %v", err)
+	}
+	if len(got) != unclassifiedDomainsCap {
+		t.Fatalf("got %d domains, want capped at %d", len(got), unclassifiedDomainsCap)
+	}
+
+	// The highest-count domain (site-<total-1>) must have survived the cap.
+	top := fmt.Sprintf("site-%03d.example", total-1)
+	found := false
+	for _, dc := range got {
+		if dc.Domain == top {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected top domain %s to survive the cap, got %+v", top, got)
+	}
+
+	// The lowest-count domain (site-000) must have been trimmed away.
+	bottom := "site-000.example"
+	for _, dc := range got {
+		if dc.Domain == bottom {
+			t.Errorf("expected lowest-count domain %s to be trimmed by the cap, got %+v", bottom, got)
+		}
+	}
+}
+
+func TestUnclassifiedDomainsLiveReadsRawQueriesForTheDay(t *testing.T) {
+	s := openTestStore(t)
+
+	day := time.Now().UTC()
+	s.LogQuery(QueryEvent{Hostname: "mystery.example", Qtype: 1, At: day})
+	s.LogQuery(QueryEvent{Hostname: "www.mystery.example", Qtype: 1, At: day})
+	s.LogQuery(QueryEvent{Hostname: "known.example", Qtype: 1, At: day})
+	waitForRawCount(t, s, 3)
+
+	classify := func(hostname string) (BucketType, string) {
+		if hostname == "known.example" {
+			return BucketCompany, "KnownCo"
+		}
+		return BucketUnclassified, ""
+	}
+
+	// Deliberately do not RollUp: UnclassifiedDomainsLive reads
+	// raw_queries directly, independent of the roll-up cursor.
+	got, err := s.UnclassifiedDomainsLive(context.Background(), day.Format("2006-01-02"), classify)
+	if err != nil {
+		t.Fatalf("UnclassifiedDomainsLive: %v", err)
+	}
+	if len(got) != 1 || got[0].Domain != "mystery.example" || got[0].Count != 2 {
+		t.Fatalf("got %+v, want a single mystery.example row with count 2", got)
+	}
+}
+
+func TestUnclassifiedDomainsLiveIsEmptyOnceRawRowsArePruned(t *testing.T) {
+	s := openTestStore(t)
+
+	old := time.Now().Add(-72 * time.Hour)
+	s.LogQuery(QueryEvent{Hostname: "old-mystery.example", Qtype: 1, At: old})
+	waitForRawCount(t, s, 1)
+
+	ctx := context.Background()
+	classify := func(hostname string) (BucketType, string) { return BucketUnclassified, "" }
+	if err := s.Prune(ctx, time.Now()); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+
+	got, err := s.UnclassifiedDomainsLive(ctx, old.UTC().Format("2006-01-02"), classify)
+	if err != nil {
+		t.Fatalf("UnclassifiedDomainsLive: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got %+v, want empty once raw rows are pruned (caller must check RawRetentionCutoff, not infer from this)", got)
 	}
 }

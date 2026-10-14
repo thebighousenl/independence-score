@@ -13,9 +13,12 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/net/publicsuffix"
 	_ "modernc.org/sqlite"
 
 	"github.com/thebighousenl/independence-score/internal/ownershipmap"
@@ -60,6 +63,13 @@ type Store struct {
 }
 
 const queueSize = 4096
+
+// unclassifiedDomainsCap is how many registered domains RollUp keeps per
+// day in unclassified_domains. It is the evidence budget for "why is this
+// day's unclassified share high": enough to show whether a handful of
+// domains dominate it, without growing the long-retention table
+// unboundedly as a long tail of one-off hostnames is pruned in.
+const unclassifiedDomainsCap = 25
 
 // Open opens (creating if needed) the SQLite file at path and runs
 // migrations. retention is how long raw query rows are kept; Prune removes
@@ -116,6 +126,12 @@ func migrate(db *sql.DB) error {
 			owner TEXT NOT NULL,
 			bucket TEXT NOT NULL,
 			category TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS unclassified_domains (
+			day TEXT NOT NULL,
+			domain TEXT NOT NULL,
+			count INTEGER NOT NULL,
+			PRIMARY KEY (day, domain)
 		)`,
 	}
 	for _, s := range stmts {
@@ -231,7 +247,13 @@ func (s *Store) RollUp(ctx context.Context, classify ClassifyFunc) error {
 		bucket BucketType
 		owner  string
 	}
+	type domainKey struct {
+		day    string
+		domain string
+	}
 	deltas := make(map[key]int64)
+	domainDeltas := make(map[domainKey]int64)
+	touchedDays := make(map[string]struct{})
 	maxID := lastID
 	for rows.Next() {
 		var id, queriedAt int64
@@ -243,6 +265,10 @@ func (s *Store) RollUp(ctx context.Context, classify ClassifyFunc) error {
 		bucket, owner := classify(hostname)
 		day := time.Unix(queriedAt, 0).UTC().Format("2006-01-02")
 		deltas[key{day, bucket, owner}]++
+		if bucket == BucketUnclassified {
+			domainDeltas[domainKey{day, registeredDomain(hostname)}]++
+			touchedDays[day] = struct{}{}
+		}
 		if id > maxID {
 			maxID = id
 		}
@@ -276,6 +302,43 @@ func (s *Store) RollUp(ctx context.Context, classify ClassifyFunc) error {
 	for k, delta := range deltas {
 		if _, err := upsert.ExecContext(ctx, k.day, string(k.bucket), k.owner, delta); err != nil {
 			return fmt.Errorf("upserting daily aggregate: %w", err)
+		}
+	}
+
+	domainUpsert, err := tx.PrepareContext(ctx, `
+		INSERT INTO unclassified_domains (day, domain, count)
+		VALUES (?, ?, ?)
+		ON CONFLICT (day, domain) DO UPDATE SET count = count + excluded.count
+	`)
+	if err != nil {
+		return err
+	}
+	defer domainUpsert.Close()
+
+	for k, delta := range domainDeltas {
+		if _, err := domainUpsert.ExecContext(ctx, k.day, k.domain, delta); err != nil {
+			return fmt.Errorf("upserting unclassified domain: %w", err)
+		}
+	}
+
+	// Trim each touched day back down to its top unclassifiedDomainsCap
+	// domains by count. This runs every roll-up rather than once at the
+	// end, so the table never grows past its cap even under sustained
+	// traffic from a long tail of one-off hostnames.
+	trim, err := tx.PrepareContext(ctx, `
+		DELETE FROM unclassified_domains
+		WHERE day = ? AND domain NOT IN (
+			SELECT domain FROM unclassified_domains WHERE day = ? ORDER BY count DESC LIMIT ?
+		)
+	`)
+	if err != nil {
+		return err
+	}
+	defer trim.Close()
+
+	for day := range touchedDays {
+		if _, err := trim.ExecContext(ctx, day, day, unclassifiedDomainsCap); err != nil {
+			return fmt.Errorf("trimming unclassified domains for %s: %w", day, err)
 		}
 	}
 
@@ -390,4 +453,124 @@ func (s *Store) SaveOwnershipMap(ctx context.Context, entries []ownershipmap.Ent
 	}
 
 	return tx.Commit()
+}
+
+// DomainCount is one registered domain's query count for a day.
+type DomainCount struct {
+	Domain string
+	Count  int64
+}
+
+// registeredDomain collapses a queried hostname down to its registered
+// domain (eTLD+1) so a view grouping unclassified traffic shows "the
+// operator resolved N registered domains it doesn't know", not one row
+// per distinct subdomain. publicsuffix is used instead of a naive
+// last-two-labels rule because multi-label public suffixes (co.uk,
+// github.io, ...) would otherwise group unrelated domains together. A
+// hostname publicsuffix cannot resolve a registered domain for - a bare
+// public suffix, a single-label name, an IP literal - falls back to the
+// lowercased hostname itself so grouping never errors out of RollUp.
+func registeredDomain(hostname string) string {
+	h := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(hostname), "."))
+	if h == "" {
+		return h
+	}
+	d, err := publicsuffix.EffectiveTLDPlusOne(h)
+	if err != nil {
+		return h
+	}
+	return d
+}
+
+// topDomainCounts sorts counts by count descending (domain name
+// ascending to break ties deterministically) and truncates to limit.
+func topDomainCounts(counts map[string]int64, limit int) []DomainCount {
+	out := make([]DomainCount, 0, len(counts))
+	for d, c := range counts {
+		out = append(out, DomainCount{Domain: d, Count: c})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Domain < out[j].Domain
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+// RawRetentionCutoff returns the oldest instant still covered by
+// raw_queries retention, as of now. A day whose entire span ends at or
+// before this instant has had every one of its raw rows pruned, so
+// UnclassifiedDomainsLive can no longer see any of it.
+func (s *Store) RawRetentionCutoff(now time.Time) time.Time {
+	return now.Add(-s.retention)
+}
+
+// UnclassifiedDomainsLive classifies every raw row still held for day and
+// groups the unclassified ones by registered domain, highest query count
+// first - evidence for whether a day's unclassified share is a few
+// missing companies or a long tail of ordinary sites. It only ever reads
+// rows still in raw_queries: a day already pruned past the retention
+// window returns an empty slice with no error. Callers must check
+// RawRetentionCutoff themselves before treating an empty result as
+// "nothing was unclassified" rather than "too old to still have raw
+// rows".
+func (s *Store) UnclassifiedDomainsLive(ctx context.Context, day string, classify ClassifyFunc) ([]DomainCount, error) {
+	start, err := time.Parse("2006-01-02", day)
+	if err != nil {
+		return nil, fmt.Errorf("parsing day %q: %w", day, err)
+	}
+	startUnix := start.UTC().Unix()
+	endUnix := start.UTC().AddDate(0, 0, 1).Unix()
+
+	rows, err := s.db.QueryContext(ctx, `SELECT hostname FROM raw_queries WHERE queried_at >= ? AND queried_at < ?`, startUnix, endUnix)
+	if err != nil {
+		return nil, fmt.Errorf("reading raw queries for %s: %w", day, err)
+	}
+	defer rows.Close()
+
+	counts := make(map[string]int64)
+	for rows.Next() {
+		var hostname string
+		if err := rows.Scan(&hostname); err != nil {
+			return nil, fmt.Errorf("scanning raw query hostname: %w", err)
+		}
+		bucket, _ := classify(hostname)
+		if bucket != BucketUnclassified {
+			continue
+		}
+		counts[registeredDomain(hostname)]++
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating raw query rows: %w", err)
+	}
+
+	return topDomainCounts(counts, unclassifiedDomainsCap), nil
+}
+
+// UnclassifiedDomainsHistory reads the capped per-day snapshot RollUp
+// wrote to unclassified_domains for day. Unlike raw_queries, this table
+// is never pruned, so it is the only source of per-domain unclassified
+// evidence once a day falls outside the raw retention window - at the
+// cost of being capped at unclassifiedDomainsCap domains rather than
+// exhaustive.
+func (s *Store) UnclassifiedDomainsHistory(ctx context.Context, day string) ([]DomainCount, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT domain, count FROM unclassified_domains WHERE day = ? ORDER BY count DESC, domain ASC`, day)
+	if err != nil {
+		return nil, fmt.Errorf("reading unclassified domain history for %s: %w", day, err)
+	}
+	defer rows.Close()
+
+	var out []DomainCount
+	for rows.Next() {
+		var dc DomainCount
+		if err := rows.Scan(&dc.Domain, &dc.Count); err != nil {
+			return nil, fmt.Errorf("scanning unclassified domain row: %w", err)
+		}
+		out = append(out, dc)
+	}
+	return out, rows.Err()
 }
