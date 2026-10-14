@@ -29,17 +29,7 @@ type fakeUpstream struct {
 func startFakeUpstream(t *testing.T) *fakeUpstream {
 	t.Helper()
 
-	udpConn, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listening udp: %v", err)
-	}
-	port := udpConn.LocalAddr().(*net.UDPAddr).Port
-
-	tcpLn, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
-	if err != nil {
-		udpConn.Close()
-		t.Fatalf("listening tcp on same port %d: %v", port, err)
-	}
+	udpConn, tcpLn, port := reserveUDPTCPPort(t)
 
 	u := &fakeUpstream{
 		addr:    "127.0.0.1:" + strconv.Itoa(port),
@@ -181,16 +171,8 @@ func answerFor(query []byte) []byte {
 func startForwarder(t *testing.T, upstream string) (addr string, logger *recordingLogger) {
 	t.Helper()
 
-	udpConn, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("picking forwarder port: %v", err)
-	}
-	port := udpConn.LocalAddr().(*net.UDPAddr).Port
-	udpConn.Close()
-
 	logger = &recordingLogger{}
 	srv := &Server{
-		Addr:     "127.0.0.1:" + strconv.Itoa(port),
 		Upstream: upstream,
 		Logger:   logger,
 		Timeout:  2 * time.Second,
@@ -200,9 +182,7 @@ func startForwarder(t *testing.T, upstream string) (addr string, logger *recordi
 	// returns every field Close touches is already written - Serve can
 	// safely run in the background with Close callable at any point
 	// after this, with no sleep-based guess required.
-	if err := srv.Listen(); err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	listenOnFreePort(t, srv)
 	go srv.Serve()
 	t.Cleanup(srv.Close)
 
@@ -215,24 +195,14 @@ func startForwarder(t *testing.T, upstream string) (addr string, logger *recordi
 func startForwarderWithCap(t *testing.T, upstream string, maxConcurrentUDP int) (addr string, srv *Server) {
 	t.Helper()
 
-	udpConn, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("picking forwarder port: %v", err)
-	}
-	port := udpConn.LocalAddr().(*net.UDPAddr).Port
-	udpConn.Close()
-
 	srv = &Server{
-		Addr:             "127.0.0.1:" + strconv.Itoa(port),
 		Upstream:         upstream,
 		Logger:           NoopLogger{},
 		Timeout:          5 * time.Second,
 		MaxConcurrentUDP: maxConcurrentUDP,
 	}
 
-	if err := srv.Listen(); err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	listenOnFreePort(t, srv)
 	go srv.Serve()
 	t.Cleanup(srv.Close)
 

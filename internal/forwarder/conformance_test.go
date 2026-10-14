@@ -338,17 +338,7 @@ type truncatingUpstream struct {
 func startTruncatingUpstream(t *testing.T) *truncatingUpstream {
 	t.Helper()
 
-	udpConn, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listening udp: %v", err)
-	}
-	port := udpConn.LocalAddr().(*net.UDPAddr).Port
-
-	tcpLn, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
-	if err != nil {
-		udpConn.Close()
-		t.Fatalf("listening tcp on same port %d: %v", port, err)
-	}
+	udpConn, tcpLn, port := reserveUDPTCPPort(t)
 
 	u := &truncatingUpstream{addr: "127.0.0.1:" + strconv.Itoa(port), udpConn: udpConn, tcpLn: tcpLn}
 	go u.serveUDP()
@@ -657,23 +647,13 @@ func startRcodeUpstream(t *testing.T, rcode int) *rcodeUpstream {
 func startForwarderWithTimeout(t *testing.T, upstream string, timeout time.Duration) (addr string, srv *Server) {
 	t.Helper()
 
-	udpConn, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("picking forwarder port: %v", err)
-	}
-	port := udpConn.LocalAddr().(*net.UDPAddr).Port
-	udpConn.Close()
-
 	srv = &Server{
-		Addr:     "127.0.0.1:" + strconv.Itoa(port),
 		Upstream: upstream,
 		Logger:   NoopLogger{},
 		Timeout:  timeout,
 	}
 
-	if err := srv.Listen(); err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	listenOnFreePort(t, srv)
 	go srv.Serve()
 	t.Cleanup(srv.Close)
 
