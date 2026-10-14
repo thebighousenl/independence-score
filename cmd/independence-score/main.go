@@ -67,6 +67,7 @@ func main() {
 
 	go runRollUpLoop(ctx, st, classify, cfg.RollUpInterval)
 	go runPruneLoop(ctx, st, cfg.RollUpInterval*10)
+	go runDroppedQueryWatchLoop(ctx, st, cfg.RollUpInterval)
 
 	dashHandler := &dashboard.Handler{Store: st}
 	go func() {
@@ -113,6 +114,29 @@ func runPruneLoop(ctx context.Context, st *store.Store, interval time.Duration) 
 			if err := st.Prune(ctx, time.Now()); err != nil {
 				log.Printf("prune error: %v", err)
 			}
+		}
+	}
+}
+
+// runDroppedQueryWatchLoop polls Store.Stats on interval and logs when the
+// dropped-query count has grown since the last check. A dropped query
+// never fails or delays a lookup (LogQuery is fire-and-forget), so this is
+// the only place that count is otherwise visible: without it, a store
+// that is falling behind the query rate would do so silently.
+func runDroppedQueryWatchLoop(ctx context.Context, st *store.Store, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	var lastDropped int64
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			dropped := st.Stats()
+			if dropped > lastDropped {
+				log.Printf("store dropped %d queries since last check (total dropped: %d) — the store is falling behind the query rate; queries were still forwarded and answered, only their log record was lost", dropped-lastDropped, dropped)
+			}
+			lastDropped = dropped
 		}
 	}
 }

@@ -13,8 +13,9 @@ import (
 )
 
 type fakeStore struct {
-	shares []store.DayShare
-	trend  []store.TrendRow
+	shares  []store.DayShare
+	trend   []store.TrendRow
+	dropped int64
 }
 
 func (f fakeStore) DayShares(ctx context.Context, day string) ([]store.DayShare, error) {
@@ -23,6 +24,10 @@ func (f fakeStore) DayShares(ctx context.Context, day string) ([]store.DayShare,
 
 func (f fakeStore) Trend(ctx context.Context, startDay, endDay string) ([]store.TrendRow, error) {
 	return f.trend, nil
+}
+
+func (f fakeStore) Stats() (dropped int64) {
+	return f.dropped
 }
 
 func TestDashboardShowsNonZeroCompanySharesAndUnclassifiedPercent(t *testing.T) {
@@ -46,6 +51,26 @@ func TestDashboardShowsNonZeroCompanySharesAndUnclassifiedPercent(t *testing.T) 
 		if !strings.Contains(body, want) {
 			t.Errorf("dashboard body missing %q\nfull body:\n%s", want, body)
 		}
+	}
+	if strings.Contains(body, "Dropped queries") {
+		t.Errorf("expected no dropped-queries line when nothing was dropped, got:\n%s", body)
+	}
+}
+
+func TestDashboardSurfacesDroppedQueryCount(t *testing.T) {
+	h := &Handler{Store: fakeStore{dropped: 42}}
+
+	req := httptest.NewRequest(http.MethodGet, "/?day=2026-10-12", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "Dropped queries: 42") {
+		t.Errorf("expected dashboard to surface the dropped query count, got:\n%s", body)
 	}
 }
 

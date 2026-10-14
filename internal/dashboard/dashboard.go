@@ -20,6 +20,11 @@ import (
 type DataSource interface {
 	DayShares(ctx context.Context, day string) ([]store.DayShare, error)
 	Trend(ctx context.Context, startDay, endDay string) ([]store.TrendRow, error)
+	// Stats reports how many logged queries have been dropped because
+	// the store's internal buffer was full, since the store opened. A
+	// dropped query must never be invisible, the same principle as the
+	// unclassified share always being shown rather than folded away.
+	Stats() (dropped int64)
 }
 
 // defaultTrendWindowDays is how many calendar days the trend covers when
@@ -49,6 +54,7 @@ type viewData struct {
 	UnclassifiedCount int64
 	UnclassifiedPct   float64
 	Trend             trendViewData
+	DroppedQueries    int64
 }
 
 // trendDay is one day's shares within the trend window, built with the
@@ -125,6 +131,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	data := buildView(day, shares)
 	data.Trend = buildTrendView(windowDays, startDay, endDay, trendRows)
+	data.DroppedQueries = h.Store.Stats()
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := pageTemplate.Execute(w, data); err != nil {
@@ -229,6 +236,7 @@ var pageTemplate = template.Must(template.New("dashboard").Parse(`<!DOCTYPE html
 <h1>Independence Score — {{.Day}}</h1>
 <p>Total queries classified: {{.Total}}</p>
 <p><strong>Unclassified: {{printf "%.1f" .UnclassifiedPct}}%</strong> ({{.UnclassifiedCount}} queries) — this share is not folded into either bucket below.</p>
+{{if .DroppedQueries}}<p><strong>Dropped queries: {{.DroppedQueries}}</strong> — logged since this instance started, not scoped to the day above. These queries were still forwarded and answered; only the record of them was lost because the store's internal buffer was full. If this grows, the store is falling behind the query rate.</p>{{end}}
 
 <h2>By company</h2>
 <table border="1" cellpadding="4">
