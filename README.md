@@ -34,6 +34,8 @@ threshold, a domain that was "unclassified" last week and is not anymore.
 ## Running it
 
 ```
+git clone https://github.com/thebighousenl/independence-score.git
+cd independence-score
 docker build -t independence-score .
 docker run -d --name independence-score \
   -p 53:53/udp -p 53:53/tcp -p 8080:8080 \
@@ -55,6 +57,19 @@ daily aggregates beneath it. The trend defaults to a 14-day window
 (`?trend_days=N` to change it) and states plainly how many of the requested
 days actually have data — a new instance with one day of history renders as
 one row, not a chart implying a longer trend than it has.
+
+Two query parameters control what the page shows:
+
+| Parameter    | Default      | Meaning                                                      |
+| ------------ | ------------ | ------------------------------------------------------------ |
+| `day`        | today in UTC | The day shown at the top, and the **last** day of the trend  |
+| `trend_days` | `14`         | How many days the trend window covers, ending on `day`       |
+
+Days are bucketed by **UTC** date, so a day is only complete once it has
+closed in UTC. `day` takes `YYYY-MM-DD`; a date it cannot parse returns
+HTTP 400 rather than quietly showing today. So to read the seven days ending
+on 2026-10-20, ask for
+`http://<container-host>:8080/?day=2026-10-20&trend_days=7`.
 
 Configuration is by environment variable:
 
