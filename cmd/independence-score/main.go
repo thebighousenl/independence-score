@@ -69,7 +69,7 @@ func main() {
 	go runPruneLoop(ctx, st, cfg.RollUpInterval*10)
 	go runDroppedQueryWatchLoop(ctx, st, cfg.RollUpInterval)
 
-	dashHandler := &dashboard.Handler{Store: st}
+	dashHandler := &dashboard.Handler{Store: st, Classify: classify}
 	go func() {
 		log.Printf("dashboard listening on %s", cfg.DashboardAddr)
 		if err := http.ListenAndServe(cfg.DashboardAddr, dashHandler); err != nil {

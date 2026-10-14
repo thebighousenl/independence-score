@@ -58,6 +58,20 @@ daily aggregates beneath it. The trend defaults to a 14-day window
 days actually have data — a new instance with one day of history renders as
 one row, not a chart implying a longer trend than it has.
 
+Below the shares, a **top unclassified domains** table shows which registered
+domains made up the chosen day's unclassified share, highest query count
+first — the evidence for whether that share is a handful of companies
+missing from the ownership map or a long tail of ordinary sites, two very
+different situations the headline percentage alone cannot tell apart. For a
+day still inside `RAW_RETENTION`, this reads the exact raw query log; past
+that window it falls back to a smaller stored snapshot (capped to the top 25
+domains at the time they were rolled up), and the page says so. If a day is
+both outside the retention window and has no stored snapshot, the page says
+that plainly too — an empty table there means no evidence was kept, not
+that nothing was unclassified. This view, like all per-domain data in this
+tool, is local to the dashboard: it is never exported, logged, or meant to
+appear in a screenshot.
+
 Two query parameters control what the page shows:
 
 | Parameter    | Default      | Meaning                                                      |

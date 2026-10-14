@@ -13,9 +13,19 @@ import (
 )
 
 type fakeStore struct {
-	shares  []store.DayShare
-	trend   []store.TrendRow
-	dropped int64
+	shares []store.DayShare
+	trend  []store.TrendRow
+
+	// liveDomains and historyDomains are returned verbatim by the
+	// corresponding method, regardless of day, so tests can pin exactly
+	// which read path fired.
+	liveDomains    []store.DomainCount
+	historyDomains []store.DomainCount
+	// retentionCutoff is returned verbatim by RawRetentionCutoff so
+	// tests can force the live-vs-history choice without depending on
+	// wall-clock time.
+	retentionCutoff time.Time
+	dropped         int64
 }
 
 func (f fakeStore) DayShares(ctx context.Context, day string) ([]store.DayShare, error) {
@@ -24,6 +34,18 @@ func (f fakeStore) DayShares(ctx context.Context, day string) ([]store.DayShare,
 
 func (f fakeStore) Trend(ctx context.Context, startDay, endDay string) ([]store.TrendRow, error) {
 	return f.trend, nil
+}
+
+func (f fakeStore) UnclassifiedDomainsLive(ctx context.Context, day string, classify store.ClassifyFunc) ([]store.DomainCount, error) {
+	return f.liveDomains, nil
+}
+
+func (f fakeStore) UnclassifiedDomainsHistory(ctx context.Context, day string) ([]store.DomainCount, error) {
+	return f.historyDomains, nil
+}
+
+func (f fakeStore) RawRetentionCutoff(now time.Time) time.Time {
+	return f.retentionCutoff
 }
 
 func (f fakeStore) Stats() (dropped int64) {
@@ -214,6 +236,91 @@ func TestBuildTrendViewGroupsRowsByDayAndKeepsChronologicalOrder(t *testing.T) {
 	}
 	if tv.Days[2].UnclassifiedCount != 3 {
 		t.Fatalf("2026-10-12 UnclassifiedCount = %d, want 3", tv.Days[2].UnclassifiedCount)
+	}
+}
+
+func TestDashboardShowsLiveUnclassifiedDomainsWithinRetention(t *testing.T) {
+	// retentionCutoff before the requested day means the whole day is
+	// still inside the raw retention window, so the live path fires.
+	cutoff, _ := time.Parse("2006-01-02", "2026-10-01")
+	h := &Handler{Store: fakeStore{
+		retentionCutoff: cutoff,
+		liveDomains: []store.DomainCount{
+			{Domain: "mystery-one.example", Count: 12},
+			{Domain: "mystery-two.example", Count: 3},
+		},
+		historyDomains: []store.DomainCount{{Domain: "must-not-appear.example", Count: 99}},
+	}}
+
+	req := httptest.NewRequest(http.MethodGet, "/?day=2026-10-12", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+
+	for _, want := range []string{"mystery-one.example", "12", "mystery-two.example", "3"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dashboard body missing %q\nfull body:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "must-not-appear.example") {
+		t.Error("expected the live path, not the history roll-up, to be used when the day is within retention")
+	}
+}
+
+func TestDashboardFallsBackToHistoryOutsideRetention(t *testing.T) {
+	// retentionCutoff after the requested day means the day is outside
+	// the raw retention window, so the history roll-up is used instead.
+	cutoff, _ := time.Parse("2006-01-02", "2026-10-14")
+	h := &Handler{Store: fakeStore{
+		retentionCutoff: cutoff,
+		liveDomains:     []store.DomainCount{{Domain: "must-not-appear.example", Count: 99}},
+		historyDomains:  []store.DomainCount{{Domain: "old-mystery.example", Count: 7}},
+	}}
+
+	req := httptest.NewRequest(http.MethodGet, "/?day=2026-10-12", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "old-mystery.example") {
+		t.Errorf("expected the history roll-up to be shown, got:\n%s", body)
+	}
+	if strings.Contains(body, "must-not-appear.example") {
+		t.Error("expected the history path, not live raw_queries, to be used once the day is outside retention")
+	}
+	if !strings.Contains(body, "outside the raw-query retention window") {
+		t.Errorf("expected the retention caveat on a history-sourced day, got:\n%s", body)
+	}
+}
+
+func TestDashboardSaysSoWhenOutsideRetentionWithNoHistory(t *testing.T) {
+	// Outside retention, and RollUp never recorded anything for this day
+	// either - the empty list must not be read as "nothing unclassified".
+	cutoff, _ := time.Parse("2006-01-02", "2026-10-14")
+	h := &Handler{Store: fakeStore{retentionCutoff: cutoff}}
+
+	req := httptest.NewRequest(http.MethodGet, "/?day=2026-10-12", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "does not mean nothing was unclassified") {
+		t.Errorf("expected the explicit no-evidence caveat, got:\n%s", body)
+	}
+	if strings.Contains(body, "No unclassified domains recorded for this day.") {
+		t.Error("an outside-retention day with no roll-up must not render the ordinary empty-table message, which reads as a verified zero")
 	}
 }
 

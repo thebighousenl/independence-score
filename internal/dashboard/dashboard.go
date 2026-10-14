@@ -20,6 +20,9 @@ import (
 type DataSource interface {
 	DayShares(ctx context.Context, day string) ([]store.DayShare, error)
 	Trend(ctx context.Context, startDay, endDay string) ([]store.TrendRow, error)
+	UnclassifiedDomainsLive(ctx context.Context, day string, classify store.ClassifyFunc) ([]store.DomainCount, error)
+	UnclassifiedDomainsHistory(ctx context.Context, day string) ([]store.DomainCount, error)
+	RawRetentionCutoff(now time.Time) time.Time
 	// Stats reports how many logged queries have been dropped because
 	// the store's internal buffer was full, since the store opened. A
 	// dropped query must never be invisible, the same principle as the
@@ -35,6 +38,11 @@ const defaultTrendWindowDays = 14
 // multi-day trend beneath it.
 type Handler struct {
 	Store DataSource
+	// Classify buckets a hostname the same way the roll-up loop does. It
+	// is only used for the top-unclassified-domains view's live read
+	// path (a day still inside raw retention); days outside that window
+	// read the pre-classified unclassified_domains roll-up instead.
+	Classify store.ClassifyFunc
 	// Now returns the current time; overridable in tests. Defaults to
 	// time.Now.
 	Now func() time.Time
@@ -47,14 +55,39 @@ type viewRow struct {
 }
 
 type viewData struct {
-	Day               string
-	Total             int64
-	Companies         []viewRow
-	SelfHosted        []viewRow
-	UnclassifiedCount int64
-	UnclassifiedPct   float64
-	Trend             trendViewData
-	DroppedQueries    int64
+	Day                 string
+	Total               int64
+	Companies           []viewRow
+	SelfHosted          []viewRow
+	UnclassifiedCount   int64
+	UnclassifiedPct     float64
+	Trend               trendViewData
+	UnclassifiedDomains unclassifiedDomainsView
+	DroppedQueries      int64
+}
+
+// unclassifiedDomainsView is the top-unclassified-domains evidence for
+// the chosen day: which registered domains made up the unclassified
+// share, so a human can tell "a few missing companies" from "a long tail
+// of ordinary sites" without guessing from the headline percentage
+// alone.
+//
+// Source names where Domains came from, because the two sources make
+// different honesty guarantees:
+//   - "live": read straight from raw_queries, which is still fully
+//     within the retention window for this day. Exact, not capped by
+//     the roll-up's top-N budget.
+//   - "history": read from the unclassified_domains roll-up, which
+//     outlives the 48h raw-row prune but is capped at the top N domains
+//     recorded at roll-up time.
+//   - "none": the day is outside the retention window and no roll-up
+//     snapshot exists for it either. Domains is empty here, and that
+//     emptiness must not be read as "nothing was unclassified" - Note
+//     says so.
+type unclassifiedDomainsView struct {
+	Domains []store.DomainCount
+	Source  string
+	Note    string
 }
 
 // trendDay is one day's shares within the trend window, built with the
@@ -133,6 +166,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	data.Trend = buildTrendView(windowDays, startDay, endDay, trendRows)
 	data.DroppedQueries = h.Store.Stats()
 
+	domainsView, err := h.unclassifiedDomainsView(r.Context(), day, endDay)
+	if err != nil {
+		http.Error(w, "loading unclassified domains: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	data.UnclassifiedDomains = domainsView
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := pageTemplate.Execute(w, data); err != nil {
 		http.Error(w, "rendering dashboard: "+err.Error(), http.StatusInternalServerError)
@@ -166,6 +206,47 @@ func buildView(day string, shares []store.DayShare) viewData {
 	sort.Slice(data.SelfHosted, func(i, j int) bool { return data.SelfHosted[i].Count > data.SelfHosted[j].Count })
 
 	return data
+}
+
+// unclassifiedDomainsView picks between the live and history read paths
+// for day's top-unclassified-domains evidence, and states plainly when
+// neither has anything to show rather than letting an empty Domains
+// slice be read as "nothing was unclassified".
+//
+// dayStart is day parsed as a UTC midnight instant. The day is treated as
+// fully covered by raw retention - and so read live, exactly - only when
+// its entire span is still at or after the retention cutoff. Otherwise
+// some or all of its raw rows may already be pruned, so the capped
+// history roll-up is used instead; that roll-up is written on every
+// RollUp regardless of retention, so it also covers "today" up to the
+// last roll-up tick even when the live path is used for the headline
+// view.
+func (h *Handler) unclassifiedDomainsView(ctx context.Context, day string, dayStart time.Time) (unclassifiedDomainsView, error) {
+	cutoff := h.Store.RawRetentionCutoff(h.now())
+
+	if !dayStart.Before(cutoff) {
+		domains, err := h.Store.UnclassifiedDomainsLive(ctx, day, h.Classify)
+		if err != nil {
+			return unclassifiedDomainsView{}, err
+		}
+		return unclassifiedDomainsView{Domains: domains, Source: "live"}, nil
+	}
+
+	domains, err := h.Store.UnclassifiedDomainsHistory(ctx, day)
+	if err != nil {
+		return unclassifiedDomainsView{}, err
+	}
+	if len(domains) == 0 {
+		return unclassifiedDomainsView{
+			Source: "none",
+			Note:   "This day is outside the raw-query retention window and no per-domain roll-up was recorded for it. An empty list here does not mean nothing was unclassified — the evidence was not kept, or this day predates this view.",
+		}, nil
+	}
+	return unclassifiedDomainsView{
+		Domains: domains,
+		Source:  "history",
+		Note:    "This day is outside the raw-query retention window. Showing the roll-up's stored snapshot, capped to its top domains at roll-up time — not necessarily every unclassified domain that day.",
+	}, nil
 }
 
 // buildTrendView groups trend rows by day and reuses the same per-day
@@ -253,6 +334,19 @@ var pageTemplate = template.Must(template.New("dashboard").Parse(`<!DOCTYPE html
 {{else}}<tr><td colspan="3">No known self-hosted traffic today.</td></tr>
 {{end}}
 </table>
+
+<h2>Top unclassified domains</h2>
+{{if eq .UnclassifiedDomains.Source "none"}}
+<p><em>{{.UnclassifiedDomains.Note}}</em></p>
+{{else}}
+{{if .UnclassifiedDomains.Note}}<p><em>{{.UnclassifiedDomains.Note}}</em></p>{{end}}
+<table border="1" cellpadding="4">
+<tr><th>Registered domain</th><th>Queries</th></tr>
+{{range .UnclassifiedDomains.Domains}}<tr><td>{{.Domain}}</td><td>{{.Count}}</td></tr>
+{{else}}<tr><td colspan="2">No unclassified domains recorded for this day.</td></tr>
+{{end}}
+</table>
+{{end}}
 
 <h2>Trend</h2>
 <p>{{len .Trend.Days}} of the {{.Trend.RequestedWindowDays}} requested days have data.
