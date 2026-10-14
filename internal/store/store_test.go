@@ -69,6 +69,25 @@ func TestLogQueryNeverBlocksWhenBufferIsFull(t *testing.T) {
 	}
 }
 
+func TestStatsReportsDroppedCountWhenBufferOverflows(t *testing.T) {
+	s := openTestStore(t)
+
+	if dropped := s.Stats(); dropped != 0 {
+		t.Fatalf("dropped = %d before any overflow, want 0", dropped)
+	}
+
+	// Enough events, fast enough, to outrun the background writer and
+	// force the internal buffer to fill. This must be visible in Stats:
+	// a dropped query must never be invisible.
+	for i := 0; i < queueSize*4; i++ {
+		s.LogQuery(QueryEvent{Hostname: "flood.example", Qtype: 1, At: time.Now()})
+	}
+
+	if dropped := s.Stats(); dropped == 0 {
+		t.Fatal("dropped = 0 after flooding past queue capacity, want > 0")
+	}
+}
+
 func TestRollUpClassifiesAndAggregates(t *testing.T) {
 	s := openTestStore(t)
 

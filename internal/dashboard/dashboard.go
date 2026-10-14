@@ -23,6 +23,11 @@ type DataSource interface {
 	UnclassifiedDomainsLive(ctx context.Context, day string, classify store.ClassifyFunc) ([]store.DomainCount, error)
 	UnclassifiedDomainsHistory(ctx context.Context, day string) ([]store.DomainCount, error)
 	RawRetentionCutoff(now time.Time) time.Time
+	// Stats reports how many logged queries have been dropped because
+	// the store's internal buffer was full, since the store opened. A
+	// dropped query must never be invisible, the same principle as the
+	// unclassified share always being shown rather than folded away.
+	Stats() (dropped int64)
 }
 
 // defaultTrendWindowDays is how many calendar days the trend covers when
@@ -58,6 +63,7 @@ type viewData struct {
 	UnclassifiedPct     float64
 	Trend               trendViewData
 	UnclassifiedDomains unclassifiedDomainsView
+	DroppedQueries      int64
 }
 
 // unclassifiedDomainsView is the top-unclassified-domains evidence for
@@ -158,6 +164,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	data := buildView(day, shares)
 	data.Trend = buildTrendView(windowDays, startDay, endDay, trendRows)
+	data.DroppedQueries = h.Store.Stats()
 
 	domainsView, err := h.unclassifiedDomainsView(r.Context(), day, endDay)
 	if err != nil {
@@ -310,6 +317,7 @@ var pageTemplate = template.Must(template.New("dashboard").Parse(`<!DOCTYPE html
 <h1>Independence Score — {{.Day}}</h1>
 <p>Total queries classified: {{.Total}}</p>
 <p><strong>Unclassified: {{printf "%.1f" .UnclassifiedPct}}%</strong> ({{.UnclassifiedCount}} queries) — this share is not folded into either bucket below.</p>
+{{if .DroppedQueries}}<p><strong>Dropped queries: {{.DroppedQueries}}</strong> — logged since this instance started, not scoped to the day above. These queries were still forwarded and answered; only the record of them was lost because the store's internal buffer was full. If this grows, the store is falling behind the query rate.</p>{{end}}
 
 <h2>By company</h2>
 <table border="1" cellpadding="4">
